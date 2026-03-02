@@ -10,6 +10,8 @@
   - [Commit message](#commit-message)
   - [`Conventional Commits`](#conventional-commits)
     - [Common commit message prefixes in `Conventional Commits`](#common-commit-message-prefixes-in-conventional-commits)
+- [`Git` branch](#git-branch)
+  - [`<branch>`](#branch)
 - [Revision](#revision)
 - [How `Git` works - text](#how-git-works---text)
 - [How `Git` works - videos](#how-git-works---videos)
@@ -91,6 +93,19 @@ Docs:
 - `fix:` for bug fixes.
 - `docs:` for documentation changes.
 - `refactor:` for code changes without behavior changes.
+
+## `Git` branch
+
+### `<branch>`
+
+A [`Git` branch](#git-branch) name (without `<` and `>`).
+
+Alternatively, a `Git` branch.
+
+Examples:
+
+- `main`
+- `upstream/main`
 
 ## Revision
 
