@@ -33,6 +33,7 @@ ALLOWED_API_ENDPOINTS = [
     "/learners",
     "/interactions",
     "/analytics",
+    "/pipeline",
 ]
 
 # System prompt for the agent
@@ -46,8 +47,11 @@ You have access to these tools:
 
 CRITICAL RULES:
 1. NEVER answer from your own knowledge - ALWAYS use tools FIRST
-2. For questions with "List all" or "List" - FIRST call list_files, THEN read_file for each file
-3. For "what domain does each handle" - use list_files to find files, then read each one
+2. For questions with "List all" or "List" - you MUST:
+   a) FIRST call list_files to get all files
+   b) THEN call read_file for EACH file returned
+   c) ONLY THEN provide final answer with all details
+3. For "what domain does each handle" - read EVERY router file, not just one
 4. For documentation questions: use read_file/list_files on wiki/, docs/
 5. For system data questions (counts, status): use query_api
 6. For code questions: use read_file on backend/app/*.py
@@ -55,9 +59,15 @@ CRITICAL RULES:
 8. When API returns [], report "0 items" - do NOT make up numbers
 
 STEP-BY-STEP APPROACH:
-- If question asks to "list" files/modules: Step 1 = list_files, Step 2 = read_file for each
-- If question asks about code structure: Step 1 = list_files on directory, Step 2 = read relevant files
-- If question asks about API: Step 1 = query_api, Step 2 = analyze response
+- If question asks to "list" files/modules: 
+  Step 1 = list_files, Step 2 = read_file for EACH file, Step 3 = final answer
+- If question asks about code structure: 
+  Step 1 = list_files on directory, Step 2 = read ALL relevant files
+- If question asks about API: 
+  Step 1 = query_api, Step 2 = analyze response
+- For HTTP status code questions: use query_api with auth=false to see the error
+
+DO NOT provide final answer until you have read ALL relevant files!
 
 Project structure:
 - backend/app/main.py - Main FastAPI application
@@ -77,14 +87,16 @@ Available API endpoints:
 - /interactions/ - List interaction logs
 - /analytics/summary - Get analytics summary
 - /analytics/completion-rate - Get completion rate
+- /analytics/top-learners - Get top learners
 
 Always respond in the same language as the user's question.
 
 IMPORTANT: 
 - Provide a complete final answer in your last message
 - Do NOT say "let me continue" - provide the full answer based on gathered information
-- For HTTP/auth errors, use query_api with use_auth=false to test without authentication
+- For HTTP/auth errors, use query_api with auth=false to test without authentication
 - NEVER skip list_files when question asks about multiple files or directories
+- NEVER answer "what does each handle" without reading ALL files first
 
 Source format in your answer:
 - For files: wiki/filename.md or backend/app/routers/analytics.py
@@ -102,7 +114,7 @@ class AgentSettings:
         self.llm_model = os.environ.get("LLM_MODEL", "qwen3-coder-plus")
 
         # LMS API configuration
-        self.lms_api_base = os.environ.get("LMS_API_URL", "http://localhost:42002")
+        self.lms_api_base = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
         self.lms_api_key = os.environ.get("LMS_API_KEY", "my-secret-api-key")
 
 
@@ -175,57 +187,77 @@ def list_files(path: str, project_root: Path) -> str:
 
 
 def query_api(
-    endpoint: str,
     method: str = "GET",
-    params: dict[str, Any] | None = None,
-    use_auth: bool = True,
+    path: str = "",
+    body: str | None = None,
+    auth: bool = True,
     settings: AgentSettings | None = None,
-) -> dict[str, Any]:
-    """Query the backend LMS API with authentication."""
+) -> str:
+    """Query the backend LMS API with authentication.
+
+    Args:
+        method: HTTP method (GET, POST, PUT, DELETE)
+        path: API endpoint path (e.g., '/items/')
+        body: Optional JSON request body for POST/PUT
+        auth: Whether to include Authorization header (default: True)
+        settings: Agent settings
+
+    Returns:
+        JSON string with status_code and body, or error message
+    """
     if settings is None:
         settings = AgentSettings()
 
-    if not validate_api_endpoint(endpoint):
-        return {
-            "error": f"Invalid endpoint: {endpoint}",
+    if not validate_api_endpoint(path):
+        return json.dumps({
+            "error": f"Invalid endpoint: {path}",
             "allowed": ALLOWED_API_ENDPOINTS,
-        }
+        })
 
     # Normalize endpoint: ensure trailing slash for FastAPI compatibility
-    if not endpoint.endswith("/"):
-        endpoint = endpoint + "/"
+    if not path.endswith("/"):
+        path = path + "/"
 
-    url = f"{settings.lms_api_base}{endpoint}"
+    url = f"{settings.lms_api_base}{path}"
 
     headers = {"Content-Type": "application/json"}
-    if use_auth:
+    if auth:
         headers["Authorization"] = f"Bearer {settings.lms_api_key}"
 
-    print(f"query_api: {method} {url}", file=sys.stderr)
+    print(f"query_api: {method} {url} (auth={auth})", file=sys.stderr)
 
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             if method.upper() == "GET":
-                response = client.get(url, headers=headers, params=params)
+                response = client.get(url, headers=headers)
             elif method.upper() == "POST":
-                response = client.post(url, headers=headers, json=params)
+                response = client.post(url, headers=headers, content=body or "{}")
+            elif method.upper() == "PUT":
+                response = client.put(url, headers=headers, content=body or "{}")
+            elif method.upper() == "DELETE":
+                response = client.delete(url, headers=headers)
             else:
-                return {"error": f"Unsupported method: {method}"}
+                return json.dumps({"error": f"Unsupported method: {method}"})
 
-            response.raise_for_status()
-            data = response.json()
-            print(f"query_api: {endpoint} - success", file=sys.stderr)
-            return data
+            result = {
+                "status_code": response.status_code,
+                "body": response.text,
+            }
+            print(f"query_api: {path} - status {response.status_code}", file=sys.stderr)
+            return json.dumps(result)
 
     except httpx.HTTPStatusError as e:
         print(f"query_api: HTTP error {e.response.status_code}", file=sys.stderr)
-        return {"error": f"HTTP {e.response.status_code}", "detail": e.response.text}
+        return json.dumps({
+            "status_code": e.response.status_code,
+            "body": e.response.text,
+        })
     except httpx.RequestError as e:
         print(f"query_api: Request error: {e}", file=sys.stderr)
-        return {"error": "Connection failed", "detail": str(e)}
+        return json.dumps({"error": "Connection failed", "detail": str(e)})
     except Exception as e:
         print(f"query_api: Unexpected error: {e}", file=sys.stderr)
-        return {"error": "Unexpected error", "detail": str(e)}
+        return json.dumps({"error": "Unexpected error", "detail": str(e)})
 
 
 # Tool definitions for LLM function calling
@@ -272,25 +304,25 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "endpoint": {
-                        "type": "string",
-                        "description": "API endpoint path (e.g., '/items', '/tasks')",
-                    },
                     "method": {
                         "type": "string",
-                        "enum": ["GET", "POST"],
+                        "enum": ["GET", "POST", "PUT", "DELETE"],
                         "description": "HTTP method (default: GET)",
                     },
-                    "params": {
-                        "type": "object",
-                        "description": "Optional query parameters or JSON body",
+                    "path": {
+                        "type": "string",
+                        "description": "API endpoint path (e.g., '/items/', '/analytics/completion-rate/')",
                     },
-                    "use_auth": {
+                    "body": {
+                        "type": "string",
+                        "description": "Optional JSON request body for POST/PUT requests",
+                    },
+                    "auth": {
                         "type": "boolean",
                         "description": "Whether to include authentication header (default: true). Set to false to test authentication errors.",
                     },
                 },
-                "required": ["endpoint"],
+                "required": ["method", "path"],
             },
         },
     },
@@ -308,11 +340,11 @@ def execute_tool_call(
     elif name == "list_files":
         return list_files(arguments.get("path", ""), project_root)
     elif name == "query_api":
-        endpoint = arguments.get("endpoint", "")
         method = arguments.get("method", "GET")
-        params = arguments.get("params")
-        use_auth = arguments.get("use_auth", True)
-        return query_api(endpoint, method, params, use_auth, settings)
+        path = arguments.get("path", "")
+        body = arguments.get("body")
+        auth = arguments.get("auth", True)
+        return query_api(method, path, body, auth, settings)
     else:
         return f"Error: Unknown tool: {name}"
 
@@ -385,12 +417,7 @@ def call_llm_with_tools(
             except json.JSONDecodeError:
                 arguments = {}
 
-            tool_call_record: dict[str, Any] = {
-                "name": name,
-                "arguments": arguments,
-            }
-            all_tool_calls.append(tool_call_record)
-
+            # Execute tool
             result = execute_tool_call(name, arguments, settings, project_root)
 
             # Track sources
@@ -404,16 +431,23 @@ def call_llm_with_tools(
             elif name == "query_api" and not (
                 isinstance(result, dict) and "error" in result
             ):
-                endpoint = str(arguments.get("endpoint", ""))
+                endpoint = str(arguments.get("path", ""))
                 sources.add(endpoint)
 
+            # Store tool call with result for output
+            tool_call_record: dict[str, Any] = {
+                "tool": name,
+                "args": arguments,
+                "result": result,
+            }
+            all_tool_calls.append(tool_call_record)
+
+            # Add tool result to conversation
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.get("id", ""),
-                    "content": json.dumps(result)
-                    if isinstance(result, dict)
-                    else str(result),
+                    "content": result,
                 }
             )
 
