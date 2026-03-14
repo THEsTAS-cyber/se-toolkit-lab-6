@@ -275,7 +275,9 @@ def main() -> None:
     print(f"Model: {settings.llm_model}", file=sys.stderr)
     print(f"LMS API: {settings.lms_api_base}", file=sys.stderr)
     answer, sources, tool_calls = call_llm_with_tools(sys.argv[1], settings)
-    result = {"answer": answer, "source": list(sources), "tool_calls": tool_calls}
+    # Join sources as comma-separated string for compatibility
+    source_str = ", ".join(sources) if sources else ""
+    result = {"answer": answer, "source": source_str, "tool_calls": tool_calls}
     print(json.dumps(result))
 
 
