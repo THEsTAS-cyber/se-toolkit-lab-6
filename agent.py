@@ -427,11 +427,11 @@ class Agent:
         self.tool_calls_history = []
 
         for iteration in range(self.MAX_ITERATIONS):
-            # Call LLM with tool definitions
-            tools = self.tools.get_tool_definitions()
-            response = self.client.chat(self.messages, tools=tools)
+            # Call LLM WITHOUT tools parameter - Qwen doesn't support it
+            # Tool definitions are in system prompt instead
+            response = self.client.chat(self.messages, tools=None)
 
-            # Parse tool calls
+            # Parse tool calls from text response
             tool_calls = self._parse_tool_calls(response)
 
             if tool_calls:
