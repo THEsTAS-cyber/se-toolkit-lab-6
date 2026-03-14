@@ -11,6 +11,7 @@ Output:
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,6 @@ ALLOWED_API_ENDPOINTS = [
 
 # System prompt for the agent
 SYSTEM_PROMPT = """You are a documentation and system assistant for a Learning Management Service.
-You help users find information in project documentation AND query the live system.
 
 You have access to these tools:
 - read_file: Read documentation files (wiki/, docs/, contributing/, backend/)
@@ -47,30 +47,15 @@ You have access to these tools:
 
 CRITICAL RULES:
 1. NEVER answer from your own knowledge - ALWAYS use tools FIRST
-2. For questions with "List all" or "List" - you MUST:
-   a) FIRST call list_files to get all files
-   b) THEN call read_file for EACH file returned
-   c) ONLY THEN provide final answer with all details
-3. For "what domain does each handle" - read EVERY router file, not just one
-4. For documentation questions: use read_file/list_files on wiki/, docs/
-5. For system data questions (counts, status): use query_api
-6. For code questions: use read_file on backend/app/*.py
-7. ALWAYS cite sources in your answer (file path or API endpoint)
-8. When API returns [], report "0 items" - do NOT make up numbers
-
-STEP-BY-STEP APPROACH:
-- If question asks to "list" files/modules: 
-  Step 1 = list_files, Step 2 = read_file for EACH file, Step 3 = final answer
-- If question asks about code structure: 
-  Step 1 = list_files on directory, Step 2 = read ALL relevant files
-- If question asks about API: 
-  Step 1 = query_api, Step 2 = analyze response
-- For HTTP status code questions: use query_api with auth=false to see the error
-
-DO NOT provide final answer until you have read ALL relevant files!
+2. For "List all" questions - you MUST read EVERY file before answering
+3. For HTTP status code questions: use query_api with auth=false
+4. For system data questions (counts, status): use query_api
+5. For code questions: use read_file on backend/app/*.py
+6. ALWAYS cite sources in your answer
+7. When API returns [], report "0 items" - do NOT make up numbers
 
 Project structure:
-- backend/app/main.py - Main FastAPI application
+- backend/app/main.py - FastAPI application
 - backend/app/settings.py - Configuration
 - backend/app/routers/items.py - Learning items and tasks
 - backend/app/routers/learners.py - Learner management
@@ -78,10 +63,9 @@ Project structure:
 - backend/app/routers/analytics.py - Analytics and statistics
 - backend/app/routers/pipeline.py - ETL pipeline
 - wiki/ - Project documentation
-- docs/ - Additional docs
 
 Available API endpoints:
-- /items/ - List all learning items (labs, tasks)
+- /items/ - List all learning items
 - /tasks/ - List all tasks
 - /learners/ - List all learners
 - /interactions/ - List interaction logs
@@ -91,15 +75,8 @@ Available API endpoints:
 
 Always respond in the same language as the user's question.
 
-IMPORTANT: 
-- Provide a complete final answer in your last message
-- Do NOT say "let me continue" - provide the full answer based on gathered information
-- For HTTP/auth errors, use query_api with auth=false to test without authentication
-- NEVER skip list_files when question asks about multiple files or directories
-- NEVER answer "what does each handle" without reading ALL files first
-
-Source format in your answer:
-- For files: wiki/filename.md or backend/app/routers/analytics.py
+Source format:
+- For files: backend/app/routers/analytics.py
 - For API: /items/ or /analytics/completion-rate/
 """
 
@@ -108,12 +85,9 @@ class AgentSettings:
     """LLM and LMS configuration from environment variables."""
 
     def __init__(self):
-        # LLM configuration
         self.llm_api_key = os.environ.get("LLM_API_KEY", "")
         self.llm_api_base = os.environ.get("LLM_API_BASE", "http://localhost:8080/v1")
         self.llm_model = os.environ.get("LLM_MODEL", "qwen3-coder-plus")
-
-        # LMS API configuration
         self.lms_api_base = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
         self.lms_api_key = os.environ.get("LMS_API_KEY", "my-secret-api-key")
 
@@ -131,7 +105,6 @@ def validate_path(relative_path: str, project_root: Path) -> Path:
         if str(target).startswith(str(allowed_path)) or str(target) == str(allowed_path):
             return target
 
-    # Also allow root-level files like docker-compose.yml, Dockerfile
     if target.parent == base and target.is_file():
         return target
 
@@ -181,7 +154,6 @@ def list_files(path: str, project_root: Path) -> str:
                 items.append(f"{item.name}/")
 
         print(f"list_files: {path} ({len(items)} items)", file=sys.stderr)
-        # Return in a clear format for LLM to understand
         return "Files:\n" + "\n".join(f"- {f}" for f in sorted(items))
     except Exception as e:
         return f"Error listing {path}: {e}"
@@ -194,18 +166,7 @@ def query_api(
     auth: bool = True,
     settings: AgentSettings | None = None,
 ) -> str:
-    """Query the backend LMS API with authentication.
-
-    Args:
-        method: HTTP method (GET, POST, PUT, DELETE)
-        path: API endpoint path (e.g., '/items/')
-        body: Optional JSON request body for POST/PUT
-        auth: Whether to include Authorization header (default: True)
-        settings: Agent settings
-
-    Returns:
-        JSON string with status_code and body, or error message
-    """
+    """Query the backend LMS API with authentication."""
     if settings is None:
         settings = AgentSettings()
 
@@ -215,7 +176,6 @@ def query_api(
             "allowed": ALLOWED_API_ENDPOINTS,
         })
 
-    # Normalize endpoint: ensure trailing slash for FastAPI compatibility
     if not path.endswith("/"):
         path = path + "/"
 
@@ -350,21 +310,35 @@ def execute_tool_call(
         return f"Error: Unknown tool: {name}"
 
 
-def call_llm_with_tools(
-    question: str, settings: AgentSettings, project_root: Path, max_iterations: int = 15
-) -> tuple[str, list[str], list[dict[str, Any]]]:
-    """Call the LLM API with tool support and agentic loop.
+def extract_tool_calls_from_response(response: dict) -> list[dict]:
+    """Extract tool calls from LLM response using native function calling."""
+    tool_calls = []
+    choice = response.get("choices", [{}])[0]
+    message = choice.get("message", {})
+    
+    # Check for native tool_calls
+    native_calls = message.get("tool_calls", [])
+    for tc in native_calls:
+        function = tc.get("function", {})
+        tool_calls.append({
+            "id": tc.get("id", ""),
+            "name": function.get("name", "unknown"),
+            "arguments": json.loads(function.get("arguments", "{}")),
+        })
+    
+    return tool_calls
 
-    Returns:
-        tuple: (answer, sources, tool_calls)
-    """
+
+def call_llm_with_tools(
+    question: str, settings: AgentSettings, project_root: Path, max_iterations: int = 20
+) -> tuple[str, list[str], list[dict[str, Any]]]:
+    """Call the LLM API with tool support and agentic loop."""
     url = f"{settings.llm_api_base}/chat/completions"
     headers = {
         "Authorization": f"Bearer {settings.llm_api_key}",
         "Content-Type": "application/json",
     }
 
-    # Initialize conversation with system prompt
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -372,6 +346,9 @@ def call_llm_with_tools(
 
     all_tool_calls: list[dict[str, Any]] = []
     sources: set[str] = set()
+    
+    # Track files to auto-read after list_files
+    pending_files: list[str] = []
 
     for iteration in range(max_iterations):
         print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---", file=sys.stderr)
@@ -398,10 +375,19 @@ def call_llm_with_tools(
 
         choice = data["choices"][0]
         message = choice["message"]
-        tool_calls = message.get("tool_calls", [])
+        tool_calls = extract_tool_calls_from_response(response)
+
+        # If no tool calls from LLM but we have pending files, auto-read them
+        if not tool_calls and pending_files:
+            next_file = pending_files.pop(0)
+            tool_calls = [{
+                "id": f"auto_{iteration}",
+                "name": "read_file",
+                "arguments": {"path": next_file},
+            }]
 
         if not tool_calls:
-            answer = message.get("content", "")
+            answer = message.get("content") or ""
             print(f"Final answer received", file=sys.stderr)
             return answer, list(sources), all_tool_calls
 
@@ -409,16 +395,9 @@ def call_llm_with_tools(
         messages.append(message)
 
         for tool_call in tool_calls:
-            function = tool_call.get("function", {})
-            name = function.get("name", "unknown")
-            arguments_str = function.get("arguments", "{}")
+            name = tool_call.get("name", "unknown")
+            arguments = tool_call.get("arguments", {})
 
-            try:
-                arguments = json.loads(arguments_str)
-            except json.JSONDecodeError:
-                arguments = {}
-
-            # Execute tool
             result = execute_tool_call(name, arguments, settings, project_root)
 
             # Track sources
@@ -426,9 +405,17 @@ def call_llm_with_tools(
                 source_path = str(arguments.get("path", ""))
                 sources.add(source_path)
             elif name == "list_files" and not str(result).startswith("Error"):
-                # Add directory path as source
                 dir_path = str(arguments.get("path", ""))
                 sources.add(dir_path)
+                
+                # Parse list_files result to find .py files to read
+                for line in result.split("\n"):
+                    line = line.strip()
+                    if line.startswith("- ") and line.endswith(".py"):
+                        file_name = line[2:]
+                        full_path = f"{dir_path}{file_name}"
+                        pending_files.append(full_path)
+                
             elif name == "query_api" and not (
                 isinstance(result, dict) and "error" in result
             ):
@@ -451,67 +438,6 @@ def call_llm_with_tools(
                     "content": result,
                 }
             )
-
-        # After list_files, auto-instruction to read all .py files
-        # This helps LLM understand it needs to read each file
-        if any(tc.get("tool") == "list_files" for tc in all_tool_calls[-len(tool_calls):] if tool_calls):
-            # Parse list_files result to get .py files
-            list_result = None
-            for tc in all_tool_calls:
-                if tc.get("tool") == "list_files":
-                    list_result = tc.get("result", "")
-                    break
-            
-            if list_result:
-                py_files = []
-                for line in list_result.split("\n"):
-                    line = line.strip()
-                    if line.startswith("- ") and line.endswith(".py"):
-                        py_files.append(line[2:])
-                
-                if py_files:
-                    # Add instruction to read all files
-                    files_list = ", ".join(py_files)
-                    messages.append({
-                        "role": "user",
-                        "content": f"Good. Now read EACH of these Python files: {files_list}. Use read_file for each one.",
-                    })
-        
-        # After read_file, check if there are more .py files to read from list_files
-        if any(tc.get("tool") == "read_file" for tc in all_tool_calls[-len(tool_calls):] if tool_calls):
-            # Find the original list_files result
-            list_result = None
-            for tc in all_tool_calls:
-                if tc.get("tool") == "list_files":
-                    list_result = tc.get("result", "")
-                    break
-            
-            if list_result:
-                # Get all .py files from list_files
-                all_py_files = set()
-                for line in list_result.split("\n"):
-                    line = line.strip()
-                    if line.startswith("- ") and line.endswith(".py"):
-                        all_py_files.add(line[2:])
-                
-                # Get files already read
-                read_files = set()
-                for tc in all_tool_calls:
-                    if tc.get("tool") == "read_file":
-                        path = tc.get("args", {}).get("path", "")
-                        # Extract filename from path
-                        if "/" in path:
-                            filename = path.split("/")[-1]
-                            read_files.add(filename)
-                
-                # If not all files read yet, prompt to continue
-                remaining = all_py_files - read_files
-                if remaining:
-                    remaining_list = ", ".join(sorted(remaining))
-                    messages.append({
-                        "role": "user",
-                        "content": f"Continue reading the remaining files: {remaining_list}. Use read_file for each one.",
-                    })
 
     # Max iterations reached - generate final answer
     print("Max iterations reached, generating final answer", file=sys.stderr)
