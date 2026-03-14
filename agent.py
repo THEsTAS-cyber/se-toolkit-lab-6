@@ -430,14 +430,6 @@ class Agent:
             # Call LLM with tool definitions
             tools = self.tools.get_tool_definitions()
             response = self.client.chat(self.messages, tools=tools)
-            
-            # Debug: print raw response
-            print(f"DEBUG iteration {iteration}", file=sys.stderr)
-            print(f"DEBUG messages count: {len(self.messages)}", file=sys.stderr)
-            choice = response.get('choices', [{}])[0]
-            msg = choice.get('message', {})
-            print(f"DEBUG content: {msg.get('content', 'N/A')[:200]}", file=sys.stderr)
-            print(f"DEBUG tool_calls: {msg.get('tool_calls', 'N/A')}", file=sys.stderr)
 
             # Parse tool calls
             tool_calls = self._parse_tool_calls(response)
@@ -449,10 +441,10 @@ class Agent:
                     tc.result = result
                     self.tool_calls_history.append(tc)
 
-                    # Add tool result in format LLM understands
+                    # Add tool result as user message (Qwen doesn't support tool role)
                     self.messages.append({
                         "role": "user",
-                        "content": f"RESULT: {result}",
+                        "content": f"[Tool result from {tc.name}]: {result}",
                     })
 
                 # Continue loop - LLM will process tool results
