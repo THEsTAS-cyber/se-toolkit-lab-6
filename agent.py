@@ -18,7 +18,7 @@ import httpx
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Allowed directories for file access
-ALLOWED_ROOTS = ["wiki", "docs", "contributing", "backend"]
+ALLOWED_ROOTS = ["wiki", "docs", "contributing", "backend", "lab"]
 
 # Allowed API endpoints for security
 ALLOWED_API_ENDPOINTS = [
@@ -27,50 +27,54 @@ ALLOWED_API_ENDPOINTS = [
     "/learners",
     "/interactions",
     "/analytics",
+    "/pipeline",
 ]
 
 # System prompt for the system agent
 SYSTEM_PROMPT = """You are a documentation and system assistant for a Learning Management Service.
-You help users find information in project documentation AND query the live system.
 
 You have access to these tools:
 - read_file: Read documentation files (wiki/, docs/, contributing/, backend/)
 - list_files: List files in a directory
 - query_api: Query the backend LMS API for live system data
 
-When answering questions:
-1. For documentation questions (how to, concepts, workflows) → use read_file/list_files
-2. For system data questions (counts, status, current data) → use query_api
-3. For code questions (frameworks, libraries, implementation) → use read_file on backend/app/*.py
-4. Cite your sources - include file paths or API endpoints in the 'source' field
-5. Be concise and accurate
-6. When asked to "list" multiple items, read ALL relevant files before providing your final answer
+CRITICAL RULES:
+1. NEVER answer from your own knowledge - ALWAYS use tools FIRST
+2. For "List all" or "what domain does each handle" questions:
+   - Step 1: Call list_files to get all files
+   - Step 2: Call read_file for EACH file (one at a time)
+   - Step 3: ONLY after reading ALL files, provide final answer
+3. NEVER provide final answer before reading ALL relevant files
+4. For documentation questions: use read_file/list_files on wiki/, docs/
+5. For system data questions (counts, status): use query_api
+6. For code questions: use read_file on backend/app/*.py
+7. Cite your sources - include file paths or API endpoints
+8. When API returns [], report "0 items" - do NOT make up numbers
 
 Project structure:
-- backend/app/main.py - Main FastAPI application
-- backend/app/settings.py - Configuration
+- backend/app/main.py - FastAPI application
 - backend/app/routers/items.py - Learning items and tasks
 - backend/app/routers/learners.py - Learner management
 - backend/app/routers/interactions.py - Interaction logs
-- backend/app/routers/analytics.py - Analytics and statistics
+- backend/app/routers/analytics.py - Analytics
 - backend/app/routers/pipeline.py - ETL pipeline
 - wiki/ - Project documentation
-- docs/ - Additional docs
 
 Available API endpoints:
-- /items - List all learning items (labs, tasks)
-- /tasks - List all tasks
-- /learners - List all learners  
-- /interactions - List interaction logs
+- /items/ - List all learning items
+- /tasks/ - List all tasks
+- /learners/ - List all learners
+- /interactions/ - List interaction logs
 - /analytics/summary - Get analytics summary
+- /analytics/completion-rate - Get completion rate
+- /analytics/top-learners - Get top learners
 
 Always respond in the same language as the user's question.
 
-IMPORTANT: Provide a complete final answer in your last message. Do not say "let me continue" - instead provide the full answer based on all the information you've gathered.
-
-When API returns an empty list [], it means there are zero items - report this clearly (e.g., "There are 0 items in the database"). Do NOT make up numbers - only report what the API actually returns.
-
-For questions about HTTP status codes or authentication errors, use query_api with use_auth=false to make requests without authentication and observe the error response."""
+IMPORTANT:
+- Provide a complete final answer in your last message
+- For "List all" questions: read EVERY file before answering
+- For HTTP/auth errors: use query_api with use_auth=false"""
 
 
 class AgentSettings(BaseSettings):
@@ -79,6 +83,7 @@ class AgentSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env.agent.secret",
         env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     # LLM configuration
@@ -87,7 +92,7 @@ class AgentSettings(BaseSettings):
     llm_model: str
 
     # LMS API configuration (optional, with defaults)
-    lms_api_base: str = "http://127.0.0.1:42001"
+    lms_api_base: str = "http://127.0.0.1:42002"
     lms_api_key: str = "my-secret-api-key"
 
 
@@ -105,25 +110,20 @@ def load_settings() -> AgentSettings:
 
 
 def validate_path(relative_path: str) -> Path:
-    """Validate and resolve a relative path securely.
-
-    Prevents path traversal attacks by ensuring the path is within allowed directories.
-    """
-    # Check for path traversal attempts
+    """Validate and resolve a relative path securely."""
     if ".." in relative_path:
         raise ValueError(f"Path traversal detected: {relative_path}")
 
-    # Resolve to absolute path
     base = Path(__file__).parent
     target = (base / relative_path).resolve()
 
-    # Check if path is within allowed roots
     for allowed_root in ALLOWED_ROOTS:
         allowed_path = (base / allowed_root).resolve()
-        if str(target).startswith(str(allowed_path)) or str(target) == str(
-            allowed_path
-        ):
+        if str(target).startswith(str(allowed_path)) or str(target) == str(allowed_path):
             return target
+
+    if target.parent == base and target.is_file():
+        return target
 
     raise ValueError(
         f"Access denied: {relative_path} is not within allowed directories ({ALLOWED_ROOTS})"
@@ -132,12 +132,10 @@ def validate_path(relative_path: str) -> Path:
 
 def validate_api_endpoint(endpoint: str) -> bool:
     """Validate that an API endpoint is allowed."""
-    # Normalize endpoint
     endpoint = endpoint.strip()
     if not endpoint.startswith("/"):
         endpoint = "/" + endpoint
 
-    # Check against allowed endpoints
     for allowed in ALLOWED_API_ENDPOINTS:
         if endpoint.startswith(allowed):
             return True
@@ -181,34 +179,20 @@ def list_files(path: str) -> list[str]:
 def query_api(
     endpoint: str, method: str = "GET", params: dict[str, Any] | None = None, use_auth: bool = True
 ) -> dict[str, Any]:
-    """Query the backend LMS API with authentication.
-
-    Args:
-        endpoint: API endpoint path (e.g., '/api/items')
-        method: HTTP method (GET or POST)
-        params: Optional query parameters or JSON body
-        use_auth: Whether to include authentication header (default: true)
-
-    Returns:
-        API response as dict, or error dict
-    """
+    """Query the backend LMS API with authentication."""
     settings = load_settings()
 
-    # Validate endpoint
     if not validate_api_endpoint(endpoint):
         return {
             "error": f"Invalid endpoint: {endpoint}",
             "allowed": ALLOWED_API_ENDPOINTS,
         }
 
-    # Normalize endpoint: ensure trailing slash for FastAPI compatibility
     if not endpoint.endswith("/"):
         endpoint = endpoint + "/"
 
-    # Build URL
     url = f"{settings.lms_api_base}{endpoint}"
-    
-    # Build headers - include auth only if requested
+
     headers = {"Content-Type": "application/json"}
     if use_auth:
         headers["Authorization"] = f"Bearer {settings.lms_api_key}"
@@ -320,7 +304,6 @@ def execute_tool_call(
     elif name == "list_files":
         return list_files(arguments.get("path", ""))
     elif name == "query_api":
-        # Load settings once and pass through
         endpoint = arguments.get("endpoint", "")
         method = arguments.get("method", "GET")
         params = arguments.get("params")
@@ -331,20 +314,15 @@ def execute_tool_call(
 
 
 def call_llm_with_tools(
-    question: str, settings: AgentSettings, max_iterations: int = 6
+    question: str, settings: AgentSettings, max_iterations: int = 20
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
-    """Call the LLM API with tool support and agentic loop.
-
-    Returns:
-        tuple: (answer, sources, tool_calls)
-    """
+    """Call the LLM API with tool support and agentic loop."""
     url = f"{settings.llm_api_base}/chat/completions"
     headers = {
         "Authorization": f"Bearer {settings.llm_api_key}",
         "Content-Type": "application/json",
     }
 
-    # Initialize conversation with system prompt
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -356,7 +334,6 @@ def call_llm_with_tools(
     for iteration in range(max_iterations):
         print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---", file=sys.stderr)
 
-        # Build request payload
         payload: dict[str, Any] = {
             "model": settings.llm_model,
             "messages": messages,
@@ -377,72 +354,60 @@ def call_llm_with_tools(
             print(f"Request error: {e}", file=sys.stderr)
             sys.exit(1)
 
-        # Parse response
         choice = data["choices"][0]
         message = choice["message"]
-
-        # Check for tool calls
         tool_calls = message.get("tool_calls", [])
 
         if not tool_calls:
-            # No tool calls - LLM provided final answer
             answer = message.get("content", "")
             print(f"Final answer received", file=sys.stderr)
             return answer, list(sources), all_tool_calls
 
-        # Process tool calls
         print(f"LLM requested {len(tool_calls)} tool call(s)", file=sys.stderr)
-
-        # Add assistant message with tool calls to conversation
         messages.append(message)
 
-        # Execute each tool call
         for tool_call in tool_calls:
             function = tool_call.get("function", {})
             name = function.get("name", "unknown")
             arguments_str = function.get("arguments", "{}")
 
-            # Parse arguments
             try:
                 arguments = json.loads(arguments_str)
             except json.JSONDecodeError:
                 arguments = {}
 
-            # Record tool call
             tool_call_record: dict[str, Any] = {
                 "name": name,
                 "arguments": arguments,
             }
             all_tool_calls.append(tool_call_record)
 
-            # Execute tool
-            result = execute_tool_call(name, arguments, settings)  # type: ignore[arg-type]
+            result = execute_tool_call(name, arguments, settings)
 
             # Track sources
             if name == "read_file" and not str(result).startswith("Error"):
-                source_path = str(arguments.get("path", ""))  # type: ignore[unknown-argument-type]
+                source_path = str(arguments.get("path", ""))
                 sources.add(source_path)
+            elif name == "list_files" and not str(result).startswith("Error"):
+                dir_path = str(arguments.get("path", ""))
+                sources.add(dir_path)
             elif name == "query_api" and not (
                 isinstance(result, dict) and "error" in result
             ):
-                endpoint = str(arguments.get("endpoint", ""))  # type: ignore[unknown-argument-type]
+                endpoint = str(arguments.get("endpoint", ""))
                 sources.add(endpoint)
 
-            # Add tool result to conversation
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.get("id", ""),
-                    "content": json.dumps(result)
-                    if isinstance(result, dict)
-                    else str(result),
+                    "content": json.dumps(result) if isinstance(result, dict) else str(result),
                 }
             )
 
-    # If we reach max iterations, generate final answer from accumulated context
+    # Max iterations reached - generate final answer
     print("Max iterations reached, generating final answer", file=sys.stderr)
 
-    # Request final answer without tools
     payload = {
         "model": settings.llm_model,
         "messages": messages,
@@ -468,16 +433,13 @@ def main() -> None:
 
     question = sys.argv[1]
 
-    # Load configuration
     settings = load_settings()
     print(f"Loaded settings from .env.agent.secret", file=sys.stderr)
     print(f"Model: {settings.llm_model}", file=sys.stderr)
     print(f"LMS API: {settings.lms_api_base}", file=sys.stderr)
 
-    # Call LLM with tools
     answer, sources, tool_calls = call_llm_with_tools(question, settings)
 
-    # Output JSON to stdout
     result: dict[str, Any] = {
         "answer": answer,
         "source": list(sources),
