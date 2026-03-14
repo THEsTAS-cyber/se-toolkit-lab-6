@@ -333,59 +333,52 @@ class Agent:
         return {
             "role": "system",
             "content": (
-                "You are a documentation and system assistant for a software engineering project. "
-                "You have access to tools:\n"
+                "You are a documentation and system assistant for a software engineering project.\n"
+                "You have access to these tools:\n"
                 "1. read_file(path) - Read a file from the project repository\n"
-                "2. list_files(path) - List files in a directory\n"
+                "2. list_files(path) - List files in a directory  \n"
                 "3. query_api(method, path) - Query the backend API\n\n"
-                "To use a tool, respond with JSON in this format:\n"
-                '{"tool_calls": [{"name": "tool_name", "arguments": {"arg": "value"}}]}\n\n'
-                "When answering questions:\n"
-                "- For documentation questions: use list_files to explore, then read_file to find answers\n"
-                "- For system/data questions: use query_api to get real-time data from the backend\n"
-                "- Always cite sources when possible (file path with section anchor, or API endpoint)\n"
-                "- If you don't find the answer, say so honestly\n"
-                "- When you have enough information, provide a final text answer (not JSON)"
+                "To use a tool, respond with EXACTLY this format on a single line:\n"
+                "TOOL: tool_name(arg1=value1, arg2=value2)\n\n"
+                "Examples:\n"
+                "TOOL: list_files(path=wiki)\n"
+                "TOOL: read_file(path=wiki/git.md)\n"
+                "TOOL: query_api(method=GET, path=/items/)\n\n"
+                "When you have enough information, provide a final answer in normal text.\n"
+                "Always cite sources (file path or API endpoint) in your answer."
             ),
         }
 
     def _parse_tool_calls(self, response: dict) -> list[ToolCall]:
         """Extract tool calls from LLM response."""
+        import re
         tool_calls = []
         choice = response.get("choices", [{}])[0]
         message = choice.get("message", {})
         content = message.get("content", "")
 
-        # Try to parse JSON from content
         if content:
             content = content.strip()
-            # Check if content looks like JSON with tool_calls
-            if content.startswith("{") and "tool_calls" in content:
-                try:
-                    data = json.loads(content)
-                    for tc in data.get("tool_calls", []):
-                        tool_calls.append(ToolCall(
-                            name=tc.get("name", "unknown"),
-                            arguments=tc.get("arguments", {}),
-                            id=tc.get("id", f"call_{len(tool_calls)}"),
-                        ))
-                    return tool_calls
-                except json.JSONDecodeError:
-                    pass
-
-        # Also check for OpenAI-style tool_calls
-        for tc in message.get("tool_calls", []):
-            if tc.get("type") == "function":
-                func = tc.get("function", {})
-                try:
-                    args = json.loads(func.get("arguments", "{}"))
-                except json.JSONDecodeError:
+            # Look for TOOL: pattern
+            for line in content.split("\n"):
+                line = line.strip()
+                match = re.match(r"TOOL:\s*(\w+)\(([^)]*)\)", line)
+                if match:
+                    tool_name = match.group(1)
+                    args_str = match.group(2)
+                    # Parse arguments like arg1=value1, arg2=value2
                     args = {}
-                tool_calls.append(ToolCall(
-                    name=func.get("name", "unknown"),
-                    arguments=args,
-                    id=tc.get("id", f"call_{len(tool_calls)}"),
-                ))
+                    for arg in args_str.split(","):
+                        arg = arg.strip()
+                        if "=" in arg:
+                            key, value = arg.split("=", 1)
+                            args[key.strip()] = value.strip().strip('"').strip("'")
+                    
+                    tool_calls.append(ToolCall(
+                        name=tool_name,
+                        arguments=args,
+                        id=f"call_{len(tool_calls)}",
+                    ))
 
         return tool_calls
 
@@ -447,10 +440,10 @@ class Agent:
                     tc.result = result
                     self.tool_calls_history.append(tc)
 
-                    # Add tool result as user message (Qwen-compatible format)
+                    # Add tool result in format LLM understands
                     self.messages.append({
                         "role": "user",
-                        "content": f"Tool result for {tc.name}({tc.arguments}): {result}",
+                        "content": f"RESULT: {result}",
                     })
 
                 # Continue loop - LLM will process tool results
