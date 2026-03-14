@@ -101,9 +101,10 @@ def _run_agent(question: str, timeout: int = 120):
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=os.environ,  # Pass environment variables to agent
         )
     except subprocess.TimeoutExpired:
-        return None, "Agent timed out (60s)"
+        return None, "Agent timed out (120s)"
     except FileNotFoundError:
         return None, "agent.py not found"
 
