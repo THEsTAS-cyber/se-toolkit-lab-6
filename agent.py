@@ -334,15 +334,18 @@ class Agent:
             "role": "system",
             "content": (
                 "You are a documentation and system assistant for a software engineering project. "
-                "You have access to:\n"
-                "1. Project files via read_file and list_files\n"
-                "2. The deployed backend API via query_api\n\n"
+                "You have access to tools:\n"
+                "1. read_file(path) - Read a file from the project repository\n"
+                "2. list_files(path) - List files in a directory\n"
+                "3. query_api(method, path) - Query the backend API\n\n"
+                "To use a tool, respond with JSON in this format:\n"
+                '{"tool_calls": [{"name": "tool_name", "arguments": {"arg": "value"}}]}\n\n'
                 "When answering questions:\n"
                 "- For documentation questions: use list_files to explore, then read_file to find answers\n"
                 "- For system/data questions: use query_api to get real-time data from the backend\n"
-                "- For framework/port/configuration questions: use query_api or read configuration files\n"
                 "- Always cite sources when possible (file path with section anchor, or API endpoint)\n"
-                "- If you don't find the answer, say so honestly"
+                "- If you don't find the answer, say so honestly\n"
+                "- When you have enough information, provide a final text answer (not JSON)"
             ),
         }
 
@@ -351,7 +354,26 @@ class Agent:
         tool_calls = []
         choice = response.get("choices", [{}])[0]
         message = choice.get("message", {})
+        content = message.get("content", "")
 
+        # Try to parse JSON from content
+        if content:
+            content = content.strip()
+            # Check if content looks like JSON with tool_calls
+            if content.startswith("{") and "tool_calls" in content:
+                try:
+                    data = json.loads(content)
+                    for tc in data.get("tool_calls", []):
+                        tool_calls.append(ToolCall(
+                            name=tc.get("name", "unknown"),
+                            arguments=tc.get("arguments", {}),
+                            id=tc.get("id", f"call_{len(tool_calls)}"),
+                        ))
+                    return tool_calls
+                except json.JSONDecodeError:
+                    pass
+
+        # Also check for OpenAI-style tool_calls
         for tc in message.get("tool_calls", []):
             if tc.get("type") == "function":
                 func = tc.get("function", {})
@@ -412,9 +434,8 @@ class Agent:
         self.tool_calls_history = []
 
         for iteration in range(self.MAX_ITERATIONS):
-            # Call LLM with tool definitions
-            tools = self.tools.get_tool_definitions()
-            response = self.client.chat(self.messages, tools=tools)
+            # Call LLM WITHOUT tool definitions - use JSON mode instead
+            response = self.client.chat(self.messages, tools=None)
 
             # Parse tool calls
             tool_calls = self._parse_tool_calls(response)
