@@ -93,7 +93,7 @@ def _fetch_question(api_url: str, auth: str, lab: str, index: int):
         sys.exit(1)
 
 
-def _run_agent(question: str, timeout: int = 120):
+def _run_agent(question: str, timeout: int = 60):
     """Run agent.py with the question. Returns (answer_dict, error_msg)."""
     try:
         result = subprocess.run(
@@ -101,10 +101,9 @@ def _run_agent(question: str, timeout: int = 120):
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=os.environ,  # Pass environment variables to agent
         )
     except subprocess.TimeoutExpired:
-        return None, "Agent timed out (120s)"
+        return None, "Agent timed out (60s)"
     except FileNotFoundError:
         return None, "agent.py not found"
 
@@ -130,6 +129,7 @@ def _run_agent(question: str, timeout: int = 120):
 # ---------------------------------------------------------------------------
 # Matching logic (mirrors autochecker evaluation)
 # ---------------------------------------------------------------------------
+
 
 def _match(text: str, rule: dict) -> bool:
     """Check if text satisfies the matching rule."""
@@ -162,7 +162,7 @@ def _match(text: str, rule: dict) -> bool:
 def _format_expected(expected: dict) -> str:
     """Human-readable description of the expected match."""
     if "contains" in expected:
-        return f"answer should contain: \"{expected['contains']}\""
+        return f'answer should contain: "{expected["contains"]}"'
     if "contains_all" in expected:
         return f"answer should contain all of: {expected['contains_all']}"
     if "any_of" in expected:
@@ -210,7 +210,10 @@ def _check_question(q: dict, data: dict) -> tuple[bool, str]:
         # Rubric-only question — locally we can only do a basic length check.
         # The autochecker bot uses LLM-based judging for more accurate scoring.
         if len(answer.split()) < 20:
-            return False, f"    {YELLOW}Answer too short for a reasoning question (bot uses LLM judge){RESET}"
+            return (
+                False,
+                f"    {YELLOW}Answer too short for a reasoning question (bot uses LLM judge){RESET}",
+            )
 
     # Check source if expected_source is defined
     expected_source = q.get("expected_source")
@@ -234,10 +237,12 @@ def _check_question(q: dict, data: dict) -> tuple[bool, str]:
     check_tools = q.get("check_tools")
     if check_tools:
         tool_calls = data.get("tool_calls", [])
-        # Use 'name' field (se6 format)
-        tools_used = {tc.get("name") for tc in tool_calls} if tool_calls else set()
-        # Filter out None values
-        tools_used = {t for t in tools_used if t}
+        # Handle both 'tool' and 'name' field names for tool calls
+        tools_used = set()
+        for tc in tool_calls:
+            tool_name = tc.get("tool") or tc.get("name", "")
+            if tool_name:
+                tools_used.add(tool_name)
         missing = set(check_tools) - tools_used
         if missing:
             return False, (
@@ -252,8 +257,10 @@ def _check_question(q: dict, data: dict) -> tuple[bool, str]:
 def main():
     parser = argparse.ArgumentParser(description="Run agent evaluation benchmark")
     parser.add_argument(
-        "--index", type=int, default=None,
-        help="Run a single question by index (for debugging)"
+        "--index",
+        type=int,
+        default=None,
+        help="Run a single question by index (for debugging)",
     )
     args = parser.parse_args()
 
@@ -283,14 +290,9 @@ def main():
 
         print(f"  Answer: {answer[:200]}")
         if source:
-            # Handle both string and list formats for source
-            if isinstance(source, list):
-                print(f"  Source: {', '.join(source)}")
-            else:
-                print(f"  Source: {source}")
+            print(f"  Source: {source}")
         if tool_calls:
-            # Use 'name' field (se6 format)
-            tools_used = [tc.get("name") or "?" for tc in tool_calls]
+            tools_used = [tc.get("tool", "?") for tc in tool_calls]
             print(f"  Tools: {', '.join(tools_used)}")
 
         if passed:

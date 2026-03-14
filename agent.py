@@ -18,7 +18,7 @@ import httpx
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Allowed directories for file access
-ALLOWED_ROOTS = ["wiki", "docs", "contributing", "backend", "lab"]
+ALLOWED_ROOTS = ["wiki", "docs", "contributing", "backend"]
 
 # Allowed API endpoints for security
 ALLOWED_API_ENDPOINTS = [
@@ -27,7 +27,6 @@ ALLOWED_API_ENDPOINTS = [
     "/learners",
     "/interactions",
     "/analytics",
-    "/pipeline",
 ]
 
 # System prompt for the system agent
@@ -59,13 +58,11 @@ Project structure:
 - docs/ - Additional docs
 
 Available API endpoints:
-- /items/ - List all learning items (labs, tasks)
-- /tasks/ - List all tasks
-- /learners/ - List all learners
-- /interactions/ - List interaction logs
+- /items - List all learning items (labs, tasks)
+- /tasks - List all tasks
+- /learners - List all learners  
+- /interactions - List interaction logs
 - /analytics/summary - Get analytics summary
-- /analytics/completion-rate - Get completion rate
-- /analytics/top-learners - Get top learners
 
 Always respond in the same language as the user's question.
 
@@ -82,7 +79,6 @@ class AgentSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env.agent.secret",
         env_file_encoding="utf-8",
-        extra="ignore",  # Ignore extra env variables like AGENT_API_BASE_URL
     )
 
     # LLM configuration
@@ -91,7 +87,7 @@ class AgentSettings(BaseSettings):
     llm_model: str
 
     # LMS API configuration (optional, with defaults)
-    lms_api_base: str = "http://127.0.0.1:42002"
+    lms_api_base: str = "http://127.0.0.1:42001"
     lms_api_key: str = "my-secret-api-key"
 
 
@@ -128,10 +124,6 @@ def validate_path(relative_path: str) -> Path:
             allowed_path
         ):
             return target
-
-    # Also allow root-level files like docker-compose.yml, Dockerfile
-    if target.parent == base and target.is_file():
-        return target
 
     raise ValueError(
         f"Access denied: {relative_path} is not within allowed directories ({ALLOWED_ROOTS})"
@@ -215,7 +207,7 @@ def query_api(
 
     # Build URL
     url = f"{settings.lms_api_base}{endpoint}"
-
+    
     # Build headers - include auth only if requested
     headers = {"Content-Type": "application/json"}
     if use_auth:
@@ -339,7 +331,7 @@ def execute_tool_call(
 
 
 def call_llm_with_tools(
-    question: str, settings: AgentSettings, max_iterations: int = 15
+    question: str, settings: AgentSettings, max_iterations: int = 6
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
     """Call the LLM API with tool support and agentic loop.
 
@@ -430,9 +422,6 @@ def call_llm_with_tools(
             if name == "read_file" and not str(result).startswith("Error"):
                 source_path = str(arguments.get("path", ""))  # type: ignore[unknown-argument-type]
                 sources.add(source_path)
-            elif name == "list_files" and not str(result).startswith("Error"):
-                dir_path = str(arguments.get("path", ""))
-                sources.add(dir_path)
             elif name == "query_api" and not (
                 isinstance(result, dict) and "error" in result
             ):
