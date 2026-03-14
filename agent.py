@@ -417,6 +417,18 @@ def call_llm_with_tools(
                 
                 # Find all relevant files and add to pending
                 for file_name in result:
+                    # If it's a directory, add files from it
+                    if file_name.endswith("/"):
+                        subdir = f"{dir_path}{file_name}"
+                        # Recursively add relevant files from subdirectory
+                        if subdir in ["backend/app/", "backend/caddy/", "caddy/"]:
+                            # Add key files from these directories
+                            for key_file in ["main.py", "settings.py", "Dockerfile", "Caddyfile"]:
+                                full_path = f"{subdir}{key_file}"
+                                if full_path not in pending_files:
+                                    pending_files.append(full_path)
+                        continue
+                    
                     # Add .py files (except __init__.py)
                     if file_name.endswith(".py") and file_name != "__init__.py":
                         full_path = f"{dir_path}{file_name}"
