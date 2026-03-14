@@ -318,7 +318,7 @@ def execute_tool_call(
 
 
 def call_llm_with_tools(
-    question: str, settings: AgentSettings, max_iterations: int = 20
+    question: str, settings: AgentSettings, max_iterations: int = 30
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
     """Call the LLM API with tool support and agentic loop."""
     url = f"{settings.llm_api_base}/chat/completions"
