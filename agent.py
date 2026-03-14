@@ -122,7 +122,7 @@ class Tools:
         except Exception as e:
             return f"Error listing directory: {e}"
 
-    def query_api(self, method: str, path: str, body: Optional[str] = None, auth: bool = True) -> str:
+    def query_api(self, method: str, path: str, body: Optional[str] = None, auth: bool = False) -> str:
         """
         Query the deployed backend API.
 
