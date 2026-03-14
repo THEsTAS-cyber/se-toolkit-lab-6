@@ -397,6 +397,10 @@ def call_llm_with_tools(
             if name == "read_file" and not str(result).startswith("Error"):
                 source_path = str(arguments.get("path", ""))
                 sources.add(source_path)
+            elif name == "list_files" and not str(result).startswith("Error"):
+                # Add directory path as source
+                dir_path = str(arguments.get("path", ""))
+                sources.add(dir_path)
             elif name == "query_api" and not (
                 isinstance(result, dict) and "error" in result
             ):
