@@ -415,12 +415,24 @@ def call_llm_with_tools(
                 dir_path = str(arguments.get("path", ""))
                 sources.add(dir_path)
                 
-                # Find all .py files and add to pending (except __init__.py)
+                # Find all relevant files and add to pending
                 for file_name in result:
+                    # Add .py files (except __init__.py)
                     if file_name.endswith(".py") and file_name != "__init__.py":
                         full_path = f"{dir_path}{file_name}"
                         if full_path not in pending_files:
                             pending_files.append(full_path)
+                    # Add Dockerfile, docker-compose.yml, Caddyfile
+                    elif file_name in ["Dockerfile", "docker-compose.yml", "Caddyfile", ".env.docker.secret"]:
+                        full_path = f"{dir_path}{file_name}"
+                        if full_path not in pending_files:
+                            pending_files.append(full_path)
+                    # Add .md files in wiki/docs
+                    elif dir_path.startswith("wiki/") or dir_path.startswith("docs/"):
+                        if file_name.endswith(".md"):
+                            full_path = f"{dir_path}{file_name}"
+                            if full_path not in pending_files:
+                                pending_files.append(full_path)
                 
             elif name == "query_api" and not (
                 isinstance(result, dict) and "error" in result
