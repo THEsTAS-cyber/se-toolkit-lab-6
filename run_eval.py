@@ -218,12 +218,17 @@ def _check_question(q: dict, data: dict) -> tuple[bool, str]:
         source = data.get("source", "")
         if not source:
             return False, f"    Missing 'source' field (expected a file reference)"
-        if not _match(source, expected_source):
+        # Handle both string and list formats for source
+        if isinstance(source, list):
+            source_str = " ".join(source)
+        else:
+            source_str = str(source)
+        if not _match(source_str, expected_source):
             feedback = q.get("feedback")
             if feedback:
                 return False, f"    {YELLOW}hint: {feedback}{RESET}"
             else:
-                return False, f"    Source '{source}' doesn't match expected"
+                return False, f"    Source '{source_str}' doesn't match expected"
 
     # Check tool usage
     check_tools = q.get("check_tools")
@@ -278,7 +283,11 @@ def main():
 
         print(f"  Answer: {answer[:200]}")
         if source:
-            print(f"  Source: {source}")
+            # Handle both string and list formats for source
+            if isinstance(source, list):
+                print(f"  Source: {', '.join(source)}")
+            else:
+                print(f"  Source: {source}")
         if tool_calls:
             # Support both 'name' and 'tool' field names
             tools_used = [tc.get("name") or tc.get("tool") or "?" for tc in tool_calls]
