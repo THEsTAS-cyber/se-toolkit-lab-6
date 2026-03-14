@@ -470,12 +470,47 @@ def call_llm_with_tools(
                         py_files.append(line[2:])
                 
                 if py_files:
-                    dir_path = arguments.get("path", "backend/app/routers/")
                     # Add instruction to read all files
                     files_list = ", ".join(py_files)
                     messages.append({
                         "role": "user",
                         "content": f"Good. Now read EACH of these Python files: {files_list}. Use read_file for each one.",
+                    })
+        
+        # After read_file, check if there are more .py files to read from list_files
+        if any(tc.get("tool") == "read_file" for tc in all_tool_calls[-len(tool_calls):] if tool_calls):
+            # Find the original list_files result
+            list_result = None
+            for tc in all_tool_calls:
+                if tc.get("tool") == "list_files":
+                    list_result = tc.get("result", "")
+                    break
+            
+            if list_result:
+                # Get all .py files from list_files
+                all_py_files = set()
+                for line in list_result.split("\n"):
+                    line = line.strip()
+                    if line.startswith("- ") and line.endswith(".py"):
+                        all_py_files.add(line[2:])
+                
+                # Get files already read
+                read_files = set()
+                for tc in all_tool_calls:
+                    if tc.get("tool") == "read_file":
+                        path = tc.get("args", {}).get("path", "")
+                        # Extract filename from path
+                        if "/" in path:
+                            filename = path.split("/")[-1]
+                            read_files.add(filename)
+                
+                # If not all files read yet, prompt to continue
+                remaining = all_py_files - read_files
+                if remaining:
+                    remaining_list = ", ".join(sorted(remaining))
+                    messages.append({
+                        "role": "user",
+                        "content": f"Continue reading the remaining files: {remaining_list}. Use read_file for each one.",
                     })
 
     # Max iterations reached - generate final answer
