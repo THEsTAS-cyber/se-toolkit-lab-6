@@ -352,6 +352,37 @@ def call_llm_with_tools(
                 },
             }
             tool_calls = [auto_tool_call]
+        # If no tool calls and no pending files but LLM says "Let me", request final answer
+        elif not messages[-1].get("tool_calls") and not pending_files:
+            # Check if last message looks like incomplete answer
+            last_msg = messages[-1].get("content", "") if messages else ""
+            if last_msg and ("Let me" in last_msg or "let me" in last_msg):
+                # Force final answer by sending a prompt
+                messages.append({
+                    "role": "user",
+                    "content": "You have read all the necessary files. Please provide your complete final answer now.",
+                })
+                # Call LLM again without tools to get final answer
+                payload = {
+                    "model": settings.llm_model,
+                    "messages": messages,
+                }
+                try:
+                    with httpx.Client(timeout=60.0) as client:
+                        response = client.post(url, headers=headers, json=payload)
+                        response.raise_for_status()
+                        data = response.json()
+                        answer = data["choices"][0]["message"]["content"]
+                        print(f"Final answer received (forced)", file=sys.stderr)
+                        return answer, list(sources), all_tool_calls
+                except Exception as e:
+                    print(f"Error getting final answer: {e}", file=sys.stderr)
+                    return "Error: Failed to get final answer", list(sources), all_tool_calls
+            else:
+                # No pending files and no incomplete answer - return what we have
+                answer = last_msg
+                print(f"Final answer received", file=sys.stderr)
+                return answer, list(sources), all_tool_calls
         else:
             payload: dict[str, Any] = {
                 "model": settings.llm_model,
