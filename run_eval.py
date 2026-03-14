@@ -229,7 +229,10 @@ def _check_question(q: dict, data: dict) -> tuple[bool, str]:
     check_tools = q.get("check_tools")
     if check_tools:
         tool_calls = data.get("tool_calls", [])
-        tools_used = {tc.get("tool") for tc in tool_calls} if tool_calls else set()
+        # Support both 'name' (new) and 'tool' (old) field names
+        tools_used = {tc.get("name") or tc.get("tool") for tc in tool_calls} if tool_calls else set()
+        # Filter out None values
+        tools_used = {t for t in tools_used if t}
         missing = set(check_tools) - tools_used
         if missing:
             return False, (
@@ -277,7 +280,8 @@ def main():
         if source:
             print(f"  Source: {source}")
         if tool_calls:
-            tools_used = [tc.get("tool", "?") for tc in tool_calls]
+            # Support both 'name' and 'tool' field names
+            tools_used = [tc.get("name") or tc.get("tool") or "?" for tc in tool_calls]
             print(f"  Tools: {', '.join(tools_used)}")
 
         if passed:
