@@ -122,7 +122,7 @@ class Tools:
         except Exception as e:
             return f"Error listing directory: {e}"
 
-    def query_api(self, method: str, path: str, body: Optional[str] = None) -> str:
+    def query_api(self, method: str, path: str, body: Optional[str] = None, auth: bool = True) -> str:
         """
         Query the deployed backend API.
 
@@ -130,6 +130,7 @@ class Tools:
             method: HTTP method (GET, POST, PUT, DELETE)
             path: API endpoint path (e.g., '/items/')
             body: Optional JSON request body for POST/PUT
+            auth: Whether to include Authorization header (default True)
 
         Returns:
             JSON string with status_code and body, or error message
@@ -140,7 +141,7 @@ class Tools:
         headers = {
             "Content-Type": "application/json",
         }
-        if self.api_key:
+        if auth and self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         try:
