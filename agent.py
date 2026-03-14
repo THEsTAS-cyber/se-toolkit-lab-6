@@ -14,6 +14,15 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional
 
+# Load environment variables from .env.agent.secret if available
+try:
+    from dotenv import load_dotenv
+    env_file = Path(__file__).parent / ".env.agent.secret"
+    if env_file.exists():
+        load_dotenv(env_file)
+except ImportError:
+    pass  # python-dotenv not installed, use system environment variables
+
 import httpx
 
 
@@ -28,6 +37,7 @@ class ToolCall:
     name: str
     arguments: dict
     result: str = ""
+    id: str = ""
 
 
 @dataclass
@@ -48,6 +58,10 @@ class Tools:
 
     def __init__(self, project_root: Path):
         self.project_root = project_root.resolve()
+
+        # Load backend API configuration
+        self.api_url = os.environ.get("LMS_API_URL", "")
+        self.api_key = os.environ.get("LMS_API_KEY", "")
 
     def _is_safe_path(self, requested_path: str) -> bool:
         """Check if requested path is within project root (no ../ traversal)."""
@@ -108,6 +122,52 @@ class Tools:
         except Exception as e:
             return f"Error listing directory: {e}"
 
+    def query_api(self, method: str, path: str, body: Optional[str] = None, auth: bool = True) -> str:
+        """
+        Query the deployed backend API.
+
+        Args:
+            method: HTTP method (GET, POST, PUT, DELETE)
+            path: API endpoint path (e.g., '/items/')
+            body: Optional JSON request body for POST/PUT
+            auth: Whether to include Authorization header (default True)
+
+        Returns:
+            JSON string with status_code and body, or error message
+        """
+        import httpx
+
+        url = f"{self.api_url.rstrip('/')}{path}"
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if auth and self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                if method.upper() == "GET":
+                    resp = client.get(url, headers=headers)
+                elif method.upper() == "POST":
+                    resp = client.post(url, headers=headers, content=body or "{}")
+                elif method.upper() == "PUT":
+                    resp = client.put(url, headers=headers, content=body or "{}")
+                elif method.upper() == "DELETE":
+                    resp = client.delete(url, headers=headers)
+                else:
+                    return f"Error: Unsupported method: {method}"
+
+                return json.dumps({
+                    "status_code": resp.status_code,
+                    "headers": dict(resp.headers),
+                    "body": resp.text,
+                }, indent=2)
+
+        except httpx.ConnectError as e:
+            return f"Error: Could not connect to API at {url} - {e}"
+        except Exception as e:
+            return f"Error querying API: {e}"
+
     def get_tool_definitions(self) -> list[dict]:
         """Return OpenAI-compatible tool definitions for the LLM."""
         return [
@@ -144,6 +204,32 @@ class Tools:
                         "required": ["path"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "query_api",
+                    "description": "Query the deployed backend API. Use this to get real-time data from the system.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "method": {
+                                "type": "string",
+                                "description": "HTTP method (GET, POST, PUT, DELETE)",
+                                "enum": ["GET", "POST", "PUT", "DELETE"]
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "API endpoint path (e.g., '/items/', '/api/items/')"
+                            },
+                            "body": {
+                                "type": "string",
+                                "description": "Optional JSON request body for POST/PUT requests"
+                            }
+                        },
+                        "required": ["method", "path"]
+                    }
+                }
             }
         ]
 
@@ -153,6 +239,12 @@ class Tools:
             return self.read_file(arguments.get("path", ""))
         elif name == "list_files":
             return self.list_files(arguments.get("path", ""))
+        elif name == "query_api":
+            return self.query_api(
+                arguments.get("method", "GET"),
+                arguments.get("path", ""),
+                arguments.get("body"),
+            )
         else:
             return f"Error: Unknown tool: {name}"
 
@@ -195,9 +287,15 @@ class LLMClient:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        resp = self.client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = self.client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            # Log error details for debugging
+            error_body = e.response.text[:500] if e.response else "No response"
+            print(f"LLM API error: {e.response.status_code} - {error_body}", file=sys.stderr)
+            raise
 
 
 # =============================================================================
@@ -216,7 +314,7 @@ class Agent:
     4. Outputs JSON with answer, source, and tool_calls
     """
 
-    MAX_ITERATIONS = 10
+    MAX_ITERATIONS = 120
 
     def __init__(self):
         self.api_base = os.environ.get("LLM_API_BASE", "http://localhost:8080/v1")
@@ -236,34 +334,57 @@ class Agent:
         return {
             "role": "system",
             "content": (
-                "You are a documentation assistant for a software engineering project. "
-                "You have access to project files via tools.\n\n"
-                "When answering questions:\n"
-                "1. First explore the wiki structure with list_files('wiki') if needed\n"
-                "2. Read relevant files with read_file(path)\n"
-                "3. Answer the question concisely and cite the source as 'path#section-anchor'\n"
-                "4. If you don't find the answer, say so honestly\n\n"
-                "Always include the source field in your final answer with the file path and section anchor."
+                "You are a documentation and system assistant for a software engineering project.\n"
+                "Project structure: backend code is in backend/app/, routers are in backend/app/routers/ (NOT backend/app/api/routers/).\n"
+                "You have access to these tools:\n"
+                "1. read_file(path) - Read a file from the project repository\n"
+                "2. list_files(path) - List files in a directory  \n"
+                "3. query_api(method, path, auth=true) - Query the backend API with auth\n\n"
+                "To use a tool, respond with EXACTLY this format on a single line:\n"
+                "TOOL: tool_name(arg1=value1, arg2=value2)\n\n"
+                "Examples:\n"
+                "TOOL: list_files(path=backend/app/routers)\n"
+                "TOOL: read_file(path=backend/app/routers/analytics.py)\n"
+                "TOOL: query_api(method=GET, path=/items/)\n"
+                "TOOL: query_api(method=GET, path=/items/, auth=false) - test without auth\n\n"
+                "When you have enough information, provide a final answer in normal text.\n"
+                "ALWAYS include a source reference in your answer using the format:\n"
+                "Source: wiki/filename.md#section-anchor\n"
+                "Or for API responses: Source: /api/endpoint/\n"
+                "Always cite sources (file path or API endpoint) in your answer."
             ),
         }
 
     def _parse_tool_calls(self, response: dict) -> list[ToolCall]:
         """Extract tool calls from LLM response."""
+        import re
         tool_calls = []
         choice = response.get("choices", [{}])[0]
         message = choice.get("message", {})
+        content = message.get("content", "")
 
-        for tc in message.get("tool_calls", []):
-            if tc.get("type") == "function":
-                func = tc.get("function", {})
-                try:
-                    args = json.loads(func.get("arguments", "{}"))
-                except json.JSONDecodeError:
+        if content:
+            content = content.strip()
+            # Look for TOOL: pattern
+            for line in content.split("\n"):
+                line = line.strip()
+                match = re.match(r"TOOL:\s*(\w+)\(([^)]*)\)", line)
+                if match:
+                    tool_name = match.group(1)
+                    args_str = match.group(2)
+                    # Parse arguments like arg1=value1, arg2=value2
                     args = {}
-                tool_calls.append(ToolCall(
-                    name=func.get("name", "unknown"),
-                    arguments=args,
-                ))
+                    for arg in args_str.split(","):
+                        arg = arg.strip()
+                        if "=" in arg:
+                            key, value = arg.split("=", 1)
+                            args[key.strip()] = value.strip().strip('"').strip("'")
+                    
+                    tool_calls.append(ToolCall(
+                        name=tool_name,
+                        arguments=args,
+                        id=f"call_{len(tool_calls)}",
+                    ))
 
         return tool_calls
 
@@ -273,18 +394,44 @@ class Agent:
         message = choice.get("message", {})
         return message.get("content", "")
 
-    def _extract_source(self, answer: str) -> str:
+    def _extract_source(self, answer: str, tool_calls: list[ToolCall]) -> str:
         """
-        Extract source reference from the answer.
+        Extract source reference from the answer or tool calls.
 
-        Looks for patterns like 'wiki/file.md#section' in the answer.
-        If not found, returns empty string.
+        Looks for patterns like 'wiki/file.md#section' or API endpoints.
+        If not found, returns the last directory listed via list_files.
         """
         import re
-        # Look for markdown-style references
+
+        # Look for markdown-style file references in answer
         match = re.search(r'(\w+/[\w\-]+\.md(?:#[\w\-]+)?)', answer)
         if match:
             return match.group(1)
+
+        # Look for explicit source reference in answer
+        match = re.search(r'Source:\s*(\S+)', answer, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+        # Look for directory paths mentioned in answer
+        match = re.search(r'(backend/app/[\w/]+)', answer)
+        if match:
+            return match.group(1)
+
+        # Look for API endpoints in tool calls
+        for tc in tool_calls:
+            if tc.name == "query_api":
+                path = tc.arguments.get("path", "")
+                if path:
+                    return path
+
+        # Use last successful list_files result
+        for tc in reversed(tool_calls):
+            if tc.name == "list_files" and not tc.result.startswith("Error"):
+                dir_path = tc.arguments.get("path", "")
+                if dir_path:
+                    return dir_path
+
         return ""
 
     def run(self, user_input: str) -> AgentResponse:
@@ -303,11 +450,11 @@ class Agent:
         self.tool_calls_history = []
 
         for iteration in range(self.MAX_ITERATIONS):
-            # Call LLM with tool definitions
-            tools = self.tools.get_tool_definitions()
-            response = self.client.chat(self.messages, tools=tools)
+            # Call LLM WITHOUT tools parameter - Qwen doesn't support it
+            # Tool definitions are in system prompt instead
+            response = self.client.chat(self.messages, tools=None)
 
-            # Parse tool calls
+            # Parse tool calls from text response
             tool_calls = self._parse_tool_calls(response)
 
             if tool_calls:
@@ -317,11 +464,10 @@ class Agent:
                     tc.result = result
                     self.tool_calls_history.append(tc)
 
-                    # Add tool result to messages
+                    # Add tool result as user message (Qwen doesn't support tool role)
                     self.messages.append({
-                        "role": "tool",
-                        "tool_call_id": f"call_{len(self.tool_calls_history)}",
-                        "content": result,
+                        "role": "user",
+                        "content": f"[Tool result from {tc.name}]: {result}",
                     })
 
                 # Continue loop - LLM will process tool results
@@ -333,8 +479,8 @@ class Agent:
                 # Add assistant message to history
                 self.messages.append({"role": "assistant", "content": answer})
 
-                # Extract source
-                source = self._extract_source(answer)
+                # Extract source from answer or tool calls
+                source = self._extract_source(answer, self.tool_calls_history)
 
                 return AgentResponse(
                     answer=answer,

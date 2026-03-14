@@ -15,9 +15,14 @@ This is a documentation agent for Lab 6. It calls an LLM API with tools (`read_f
 Set the following environment variables (or use `.env.agent.secret`):
 
 ```bash
+# LLM configuration
 LLM_API_KEY=my-secret-qwen-key
 LLM_API_BASE=http://10.93.25.104:42005/v1
 LLM_MODEL=qwen3-coder-plus
+
+# Backend API configuration (for query_api tool)
+LMS_API_URL=http://localhost:8000
+LMS_API_KEY=my-secret-api-key
 ```
 
 ## Usage
@@ -60,7 +65,7 @@ The agent outputs JSON to stdout:
 | Field | Type | Description |
 |-------|------|-------------|
 | `answer` | string | The LLM's text response |
-| `source` | string | Reference to the source file (e.g., `wiki/file.md#section`) |
+| `source` | string | Reference to the source (file path like `wiki/file.md#section` or API endpoint like `/api/items/`). Optional for system questions. |
 | `tool_calls` | array | All tool invocations with `tool`, `args`, and `result` |
 
 ## Architecture
@@ -108,6 +113,23 @@ List files and directories at a given path.
 
 **Security:** Rejects paths with `..` traversal to prevent listing directories outside project directory.
 
+### query_api
+
+Query the deployed backend API.
+
+**Parameters:**
+- `method` (string): HTTP method (GET, POST, PUT, DELETE)
+- `path` (string): API endpoint path (e.g., `/items/`)
+- `body` (string, optional): JSON request body for POST/PUT requests
+
+**Returns:** JSON string with `status_code`, `headers`, and `body`
+
+**Authentication:** Uses `LMS_API_KEY` from environment for Bearer token authentication.
+
+**Configuration:**
+- `LMS_API_URL`: Backend API URL (default: `http://localhost:8000`)
+- `LMS_API_KEY`: API key for authentication (from `.env.docker.secret`)
+
 ## Agentic Loop
 
 1. Send user question + tool definitions to LLM
@@ -122,8 +144,9 @@ The system prompt instructs the LLM to:
 
 1. Use `list_files("wiki")` to discover wiki files when needed
 2. Use `read_file(path)` to read relevant documentation
-3. Always cite sources with file path and section anchor (`path#section`)
-4. Be concise and honest if the answer is not found
+3. Use `query_api(method, path)` to get real-time data from the backend
+4. Always cite sources with file path and section anchor (`path#section`) or API endpoint
+5. Be concise and honest if the answer is not found
 
 ## Components
 

@@ -170,6 +170,19 @@ class TestTools(unittest.TestCase):
         self.assertIn("Error", listing, "Should block path traversal")
         self.assertIn("Access denied", listing, "Should mention access denied")
 
+    def test_query_api_structure(self):
+        """Test that query_api method exists and has correct signature."""
+        # Just check the method exists and can be called
+        # Actual API testing requires running backend
+        self.assertTrue(hasattr(self.tools, "query_api"), "query_api method should exist")
+
+    def test_query_api_connection_error(self):
+        """Test query_api handles connection errors gracefully."""
+        # This should fail with connection error, not crash
+        result = self.tools.query_api("GET", "/health")
+        self.assertIn("Error", result, "Should return error when API is unavailable")
+        self.assertIn("Could not connect", result, "Should mention connection issue")
+
 
 if __name__ == "__main__":
     # Run tool tests first (no LLM required)
