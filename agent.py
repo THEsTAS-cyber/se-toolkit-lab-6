@@ -314,7 +314,7 @@ class Agent:
     4. Outputs JSON with answer, source, and tool_calls
     """
 
-    MAX_ITERATIONS = 20
+    MAX_ITERATIONS = 120
 
     def __init__(self):
         self.api_base = os.environ.get("LLM_API_BASE", "http://localhost:8080/v1")
