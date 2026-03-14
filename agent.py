@@ -330,42 +330,58 @@ def call_llm_with_tools(
 
     all_tool_calls: list[dict[str, Any]] = []
     sources: set[str] = set()
+    
+    # Track files from list_files for auto-reading
+    pending_files: list[str] = []
 
     for iteration in range(max_iterations):
         print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---", file=sys.stderr)
 
-        payload: dict[str, Any] = {
-            "model": settings.llm_model,
-            "messages": messages,
-            "tools": TOOLS,
-        }
+        # If no tool calls from LLM but we have pending files, auto-read next file
+        if not messages[-1].get("tool_calls") and pending_files:
+            next_file = pending_files.pop(0)
+            auto_tool_call = {
+                "id": f"auto_{iteration}",
+                "function": {
+                    "name": "read_file",
+                    "arguments": json.dumps({"path": next_file}),
+                },
+            }
+            tool_calls = [auto_tool_call]
+        else:
+            payload: dict[str, Any] = {
+                "model": settings.llm_model,
+                "messages": messages,
+                "tools": TOOLS,
+            }
 
-        try:
-            with httpx.Client(timeout=60.0) as client:
-                response = client.post(url, headers=headers, json=payload)
-                response.raise_for_status()
-                data = response.json()
+            try:
+                with httpx.Client(timeout=60.0) as client:
+                    response = client.post(url, headers=headers, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
 
-        except httpx.HTTPStatusError as e:
-            print(f"HTTP error: {e}", file=sys.stderr)
-            print(f"Response: {e.response.text}", file=sys.stderr)
-            sys.exit(1)
-        except httpx.RequestError as e:
-            print(f"Request error: {e}", file=sys.stderr)
-            sys.exit(1)
+            except httpx.HTTPStatusError as e:
+                print(f"HTTP error: {e}", file=sys.stderr)
+                print(f"Response: {e.response.text}", file=sys.stderr)
+                sys.exit(1)
+            except httpx.RequestError as e:
+                print(f"Request error: {e}", file=sys.stderr)
+                sys.exit(1)
 
-        choice = data["choices"][0]
-        message = choice["message"]
-        tool_calls = message.get("tool_calls", [])
+            choice = data["choices"][0]
+            message = choice["message"]
+            tool_calls = message.get("tool_calls", [])
 
-        if not tool_calls:
-            answer = message.get("content", "")
-            print(f"Final answer received", file=sys.stderr)
-            return answer, list(sources), all_tool_calls
+            if not tool_calls:
+                answer = message.get("content", "")
+                print(f"Final answer received", file=sys.stderr)
+                return answer, list(sources), all_tool_calls
 
-        print(f"LLM requested {len(tool_calls)} tool call(s)", file=sys.stderr)
-        messages.append(message)
+            print(f"LLM requested {len(tool_calls)} tool call(s)", file=sys.stderr)
+            messages.append(message)
 
+        # Execute each tool call
         for tool_call in tool_calls:
             function = tool_call.get("function", {})
             name = function.get("name", "unknown")
@@ -384,13 +400,24 @@ def call_llm_with_tools(
 
             result = execute_tool_call(name, arguments, settings)
 
-            # Track sources
+            # Track sources and pending files
             if name == "read_file" and not str(result).startswith("Error"):
                 source_path = str(arguments.get("path", ""))
                 sources.add(source_path)
+                # Remove from pending if it was there
+                if source_path in pending_files:
+                    pending_files.remove(source_path)
             elif name == "list_files" and not str(result).startswith("Error"):
                 dir_path = str(arguments.get("path", ""))
                 sources.add(dir_path)
+                
+                # Find all .py files and add to pending (except __init__.py)
+                for file_name in result:
+                    if file_name.endswith(".py") and file_name != "__init__.py":
+                        full_path = f"{dir_path}{file_name}"
+                        if full_path not in pending_files:
+                            pending_files.append(full_path)
+                
             elif name == "query_api" and not (
                 isinstance(result, dict) and "error" in result
             ):
