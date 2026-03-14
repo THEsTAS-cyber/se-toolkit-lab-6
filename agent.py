@@ -82,6 +82,7 @@ class AgentSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env.agent.secret",
         env_file_encoding="utf-8",
+        extra="ignore",  # Ignore extra env variables like AGENT_API_BASE_URL
     )
 
     # LLM configuration
