@@ -208,6 +208,11 @@ def call_llm_with_tools(question: str, settings: AgentSettings, max_iterations: 
 
             if not tool_calls:
                 answer = message.get("content", "")
+                # Check if answer looks incomplete
+                if answer and ("Let me" in answer or "let me" in answer or "Now I'll" in answer or "I need to" in answer):
+                    # Force final answer
+                    messages.append({"role": "user", "content": "You have read all necessary files. Provide your complete final answer now without any more tool calls."})
+                    continue
                 print(f"Final answer received", file=sys.stderr)
                 return answer, list(sources), all_tool_calls
 
