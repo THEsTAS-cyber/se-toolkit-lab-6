@@ -288,7 +288,8 @@ def main():
         if source:
             print(f"  Source: {source}")
         if tool_calls:
-            tools_used = [tc.get("tool", "?") for tc in tool_calls]
+            # Support both 'tool' and 'name' field names
+            tools_used = [tc.get("tool") or tc.get("name") or "?" for tc in tool_calls]
             print(f"  Tools: {', '.join(tools_used)}")
 
         if passed:

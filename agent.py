@@ -224,9 +224,10 @@ def call_llm_with_tools(question: str, settings: AgentSettings, max_iterations: 
             name = function.get("name", "unknown")
             arguments = json.loads(function.get("arguments", "{}"))
 
-            tool_call_record = {"name": name, "arguments": arguments}
-            all_tool_calls.append(tool_call_record)
             result = execute_tool_call(name, arguments, settings)
+
+            tool_call_record = {"name": name, "arguments": arguments, "result": result}
+            all_tool_calls.append(tool_call_record)
 
             if name == "read_file" and not str(result).startswith("Error"):
                 sources.add(arguments.get("path", ""))
@@ -277,7 +278,12 @@ def main() -> None:
     answer, sources, tool_calls = call_llm_with_tools(sys.argv[1], settings)
     # Join sources as comma-separated string for compatibility
     source_str = ", ".join(sources) if sources else ""
-    result = {"answer": answer, "source": source_str, "tool_calls": tool_calls}
+    # Format tool_calls as {"tool": ..., "args": ..., "result": ...} per task spec
+    formatted_tool_calls = [
+        {"tool": tc["name"], "args": tc["arguments"], "result": tc.get("result", "")}
+        for tc in tool_calls
+    ]
+    result = {"answer": answer, "source": source_str, "tool_calls": formatted_tool_calls}
     print(json.dumps(result))
 
 
