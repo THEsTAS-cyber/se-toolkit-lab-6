@@ -45,13 +45,19 @@ You have access to these tools:
 - query_api: Query the backend LMS API for live system data
 
 CRITICAL RULES:
-1. NEVER answer from your own knowledge - ALWAYS use tools to get information
-2. For "list" questions: FIRST use list_files, THEN read_file for each relevant file
-3. For documentation questions: use read_file/list_files on wiki/, docs/
-4. For system data questions (counts, status): use query_api
-5. For code questions: use read_file on backend/app/*.py
-6. ALWAYS cite sources in your answer (file path or API endpoint)
-7. When API returns [], report "0 items" - do NOT make up numbers
+1. NEVER answer from your own knowledge - ALWAYS use tools FIRST
+2. For questions with "List all" or "List" - FIRST call list_files, THEN read_file for each file
+3. For "what domain does each handle" - use list_files to find files, then read each one
+4. For documentation questions: use read_file/list_files on wiki/, docs/
+5. For system data questions (counts, status): use query_api
+6. For code questions: use read_file on backend/app/*.py
+7. ALWAYS cite sources in your answer (file path or API endpoint)
+8. When API returns [], report "0 items" - do NOT make up numbers
+
+STEP-BY-STEP APPROACH:
+- If question asks to "list" files/modules: Step 1 = list_files, Step 2 = read_file for each
+- If question asks about code structure: Step 1 = list_files on directory, Step 2 = read relevant files
+- If question asks about API: Step 1 = query_api, Step 2 = analyze response
 
 Project structure:
 - backend/app/main.py - Main FastAPI application
@@ -78,6 +84,7 @@ IMPORTANT:
 - Provide a complete final answer in your last message
 - Do NOT say "let me continue" - provide the full answer based on gathered information
 - For HTTP/auth errors, use query_api with use_auth=false to test without authentication
+- NEVER skip list_files when question asks about multiple files or directories
 
 Source format in your answer:
 - For files: wiki/filename.md or backend/app/routers/analytics.py
@@ -147,12 +154,12 @@ def read_file(path: str, project_root: Path) -> str:
         return f"Error reading {path}: {e}"
 
 
-def list_files(path: str, project_root: Path) -> list[str]:
+def list_files(path: str, project_root: Path) -> str:
     """List files in a directory."""
     try:
         validated_path = validate_path(path, project_root)
         if not validated_path.is_dir():
-            return [f"Error: Not a directory: {path}"]
+            return f"Error: Not a directory: {path}"
 
         items: list[str] = []
         for item in validated_path.iterdir():
@@ -162,9 +169,9 @@ def list_files(path: str, project_root: Path) -> list[str]:
                 items.append(f"{item.name}/")
 
         print(f"list_files: {path} ({len(items)} items)", file=sys.stderr)
-        return sorted(items)
+        return "\n".join(sorted(items))
     except Exception as e:
-        return [f"Error listing {path}: {e}"]
+        return f"Error listing {path}: {e}"
 
 
 def query_api(
