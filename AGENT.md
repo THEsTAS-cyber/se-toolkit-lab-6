@@ -2,13 +2,13 @@
 
 ## Overview
 
-This is a simple LLM-powered agent for Lab 6. It calls an LLM API and returns structured responses.
+This is a documentation agent for Lab 6. It calls an LLM API with tools (`read_file`, `list_files`) to answer questions about project documentation by reading actual files from the repository.
 
 ## LLM Provider
 
 - **Provider:** Qwen Code API (via qwen-code-oai-proxy)
 - **Model:** `qwen3-coder-plus`
-- **API Format:** OpenAI-compatible chat completions
+- **API Format:** OpenAI-compatible chat completions with function calling
 
 ## Configuration
 
@@ -29,7 +29,7 @@ LLM_MODEL=qwen3-coder-plus
 set -a && source .env.agent.secret && set +a
 
 # Run the agent
-python agent.py "What is 2+2?"
+python agent.py "How do you resolve a merge conflict?"
 ```
 
 ### Output Format
@@ -38,47 +38,124 @@ The agent outputs JSON to stdout:
 
 ```json
 {
-  "answer": "The answer from the LLM",
-  "tool_calls": []
-}
-```
-
-When tools are used (Task 2-3):
-
-```json
-{
-  "answer": "",
+  "answer": "Edit the conflicting file, choose which changes to keep, then stage and commit.",
+  "source": "wiki/git-workflow.md#resolving-merge-conflicts",
   "tool_calls": [
-    {"name": "read_file", "arguments": {"path": "README.md"}}
+    {
+      "tool": "list_files",
+      "args": {"path": "wiki"},
+      "result": "git-workflow.md\nbranching.md\n..."
+    },
+    {
+      "tool": "read_file",
+      "args": {"path": "wiki/git-workflow.md"},
+      "result": "# Git Workflow\n\n## Resolving Merge Conflicts\n..."
+    }
   ]
 }
 ```
 
+### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `answer` | string | The LLM's text response |
+| `source` | string | Reference to the source file (e.g., `wiki/file.md#section`) |
+| `tool_calls` | array | All tool invocations with `tool`, `args`, and `result` |
+
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────┐
-│  agent.py   │────▶│  LLMClient       │────▶│  HTTP API   │
-│  (Agent)    │◀────│  (httpx)         │◀────│  (Qwen)     │
-└─────────────┘     └──────────────────┘     └─────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                         Agent Loop                               │
+│                                                                  │
+│  User Input ──▶ Add to messages ──▶ LLM Call                    │
+│                                          │                       │
+│                     ┌────────────────────┼────────────────────┐  │
+│                     │                    │                    │  │
+│                     ▼                    ▼                    │  │
+│              Tool Calls?           Text Answer?                │  │
+│                 │  yes                │  no                   │  │
+│                 ▼                     ▼                       │  │
+│         Execute Tools          Extract Answer                  │  │
+│         Append results         Extract Source                  │  │
+│         Back to LLM            Output JSON                     │  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Components
+## Tools
 
-1. **`Agent`** - Main agent class that manages conversation history and calls the LLM
-2. **`LLMClient`** - HTTP client for OpenAI-compatible API calls
-3. **`AgentResponse`** - Dataclass for structured output
-4. **`ToolCall`** - Dataclass representing a tool invocation
+### read_file
+
+Read a file from the project repository.
+
+**Parameters:**
+- `path` (string): Relative path from project root (e.g., `wiki/git-workflow.md`)
+
+**Returns:** File contents as string, or error message
+
+**Security:** Rejects paths with `..` traversal to prevent reading files outside project directory.
+
+### list_files
+
+List files and directories at a given path.
+
+**Parameters:**
+- `path` (string): Relative directory path from project root (e.g., `wiki`)
+
+**Returns:** Newline-separated listing of entries
+
+**Security:** Rejects paths with `..` traversal to prevent listing directories outside project directory.
+
+## Agentic Loop
+
+1. Send user question + tool definitions to LLM
+2. Parse response:
+   - If `tool_calls`: execute each tool, append results as `tool` role messages, repeat from step 1
+   - If text answer: extract answer and source, output JSON, exit
+3. Stop after 10 tool calls maximum
+
+## System Prompt Strategy
+
+The system prompt instructs the LLM to:
+
+1. Use `list_files("wiki")` to discover wiki files when needed
+2. Use `read_file(path)` to read relevant documentation
+3. Always cite sources with file path and section anchor (`path#section`)
+4. Be concise and honest if the answer is not found
+
+## Components
+
+| Component | Description |
+|-----------|-------------|
+| `Agent` | Main agent class with agentic loop |
+| `LLMClient` | HTTP client for OpenAI-compatible API calls |
+| `Tools` | Collection of tool implementations |
+| `AgentResponse` | Dataclass for structured output |
+| `ToolCall` | Dataclass representing a tool invocation |
 
 ## Running Tests
 
 ```bash
-# Run the regression test
+# Run all tests
 python -m pytest tests/test_agent.py -v
+
+# Run specific test
+python -m pytest tests/test_agent.py::test_merge_conflict_question -v
 ```
 
-## Next Steps (Task 2-3)
+## Project Structure
 
-1. Add tools: `read_file`, `list_files`, `query_api`
-2. Implement tool execution in the agent loop
-3. Expand system prompt with domain knowledge
+```
+se-toolkit-lab-6/
+├── agent.py           # Main agent implementation
+├── AGENT.md           # This documentation
+├── plans/
+│   ├── task-1.md      # Task 1 plan
+│   └── task-2.md      # Task 2 plan
+├── tests/
+│   └── test_agent.py  # Regression tests
+└── wiki/              # Documentation files
+    └── ...
+```
