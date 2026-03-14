@@ -345,6 +345,9 @@ class Agent:
                 "TOOL: read_file(path=wiki/git.md)\n"
                 "TOOL: query_api(method=GET, path=/items/)\n\n"
                 "When you have enough information, provide a final answer in normal text.\n"
+                "ALWAYS include a source reference in your answer using the format:\n"
+                "Source: wiki/filename.md#section-anchor\n"
+                "Or for API responses: Source: /api/endpoint/\n"
                 "Always cite sources (file path or API endpoint) in your answer."
             ),
         }
