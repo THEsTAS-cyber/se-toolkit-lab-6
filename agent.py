@@ -396,12 +396,22 @@ class Agent:
         Extract source reference from the answer or tool calls.
 
         Looks for patterns like 'wiki/file.md#section' or API endpoints.
-        If not found, returns empty string.
+        If not found, returns the last directory listed via list_files.
         """
         import re
 
-        # Look for markdown-style file references
+        # Look for markdown-style file references in answer
         match = re.search(r'(\w+/[\w\-]+\.md(?:#[\w\-]+)?)', answer)
+        if match:
+            return match.group(1)
+
+        # Look for explicit source reference in answer
+        match = re.search(r'Source:\s*(\S+)', answer, re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+        # Look for directory paths mentioned in answer
+        match = re.search(r'(backend/app/[\w/]+)', answer)
         if match:
             return match.group(1)
 
@@ -411,6 +421,13 @@ class Agent:
                 path = tc.arguments.get("path", "")
                 if path:
                     return path
+
+        # Use last successful list_files result
+        for tc in reversed(tool_calls):
+            if tc.name == "list_files" and not tc.result.startswith("Error"):
+                dir_path = tc.arguments.get("path", "")
+                if dir_path:
+                    return dir_path
 
         return ""
 
