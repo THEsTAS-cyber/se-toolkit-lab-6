@@ -44,13 +44,14 @@ You have access to these tools:
 - list_files: List files in a directory
 - query_api: Query the backend LMS API for live system data
 
-When answering questions:
-1. For documentation questions (how to, concepts, workflows) → use read_file/list_files
-2. For system data questions (counts, status, current data) → use query_api
-3. For code questions (frameworks, libraries, implementation) → use read_file on backend/app/*.py
-4. Cite your sources - include file paths or API endpoints in the 'source' field
-5. Be concise and accurate
-6. When asked to "list" multiple items, read ALL relevant files before providing your final answer
+CRITICAL RULES:
+1. NEVER answer from your own knowledge - ALWAYS use tools to get information
+2. For "list" questions: FIRST use list_files, THEN read_file for each relevant file
+3. For documentation questions: use read_file/list_files on wiki/, docs/
+4. For system data questions (counts, status): use query_api
+5. For code questions: use read_file on backend/app/*.py
+6. ALWAYS cite sources in your answer (file path or API endpoint)
+7. When API returns [], report "0 items" - do NOT make up numbers
 
 Project structure:
 - backend/app/main.py - Main FastAPI application
@@ -59,6 +60,7 @@ Project structure:
 - backend/app/routers/learners.py - Learner management
 - backend/app/routers/interactions.py - Interaction logs
 - backend/app/routers/analytics.py - Analytics and statistics
+- backend/app/routers/pipeline.py - ETL pipeline
 - wiki/ - Project documentation
 - docs/ - Additional docs
 
@@ -72,13 +74,12 @@ Available API endpoints:
 
 Always respond in the same language as the user's question.
 
-IMPORTANT: Provide a complete final answer in your last message. Do not say "let me continue" - instead provide the full answer based on all the information you've gathered.
+IMPORTANT: 
+- Provide a complete final answer in your last message
+- Do NOT say "let me continue" - provide the full answer based on gathered information
+- For HTTP/auth errors, use query_api with use_auth=false to test without authentication
 
-When API returns an empty list [], it means there are zero items - report this clearly (e.g., "There are 0 items in the database"). Do NOT make up numbers - only report what the API actually returns.
-
-For questions about HTTP status codes or authentication errors, use query_api with use_auth=false to make requests without authentication and observe the error response.
-
-ALWAYS include a source reference in your answer:
+Source format in your answer:
 - For files: wiki/filename.md or backend/app/routers/analytics.py
 - For API: /items/ or /analytics/completion-rate/
 """
@@ -310,7 +311,7 @@ def execute_tool_call(
 
 
 def call_llm_with_tools(
-    question: str, settings: AgentSettings, project_root: Path, max_iterations: int = 10
+    question: str, settings: AgentSettings, project_root: Path, max_iterations: int = 15
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
     """Call the LLM API with tool support and agentic loop.
 
