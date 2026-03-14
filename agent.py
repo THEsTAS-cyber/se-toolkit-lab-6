@@ -427,13 +427,17 @@ class Agent:
         self.tool_calls_history = []
 
         for iteration in range(self.MAX_ITERATIONS):
-            # Call LLM WITHOUT tool definitions - use JSON mode instead
+            # Call LLM with tool definitions
             tools = self.tools.get_tool_definitions()
             response = self.client.chat(self.messages, tools=tools)
             
-            # Debug: print messages and response
-            print(f"DEBUG: Iteration {iteration}, Messages: {len(self.messages)}", file=sys.stderr)
-            print(f"DEBUG: Response choices: {response.get('choices', [])}", file=sys.stderr)
+            # Debug: print raw response
+            print(f"DEBUG iteration {iteration}", file=sys.stderr)
+            print(f"DEBUG messages count: {len(self.messages)}", file=sys.stderr)
+            choice = response.get('choices', [{}])[0]
+            msg = choice.get('message', {})
+            print(f"DEBUG content: {msg.get('content', 'N/A')[:200]}", file=sys.stderr)
+            print(f"DEBUG tool_calls: {msg.get('tool_calls', 'N/A')}", file=sys.stderr)
 
             # Parse tool calls
             tool_calls = self._parse_tool_calls(response)
