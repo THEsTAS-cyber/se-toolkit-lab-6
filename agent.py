@@ -181,7 +181,8 @@ def list_files(path: str, project_root: Path) -> str:
                 items.append(f"{item.name}/")
 
         print(f"list_files: {path} ({len(items)} items)", file=sys.stderr)
-        return "\n".join(sorted(items))
+        # Return in a clear format for LLM to understand
+        return "Files:\n" + "\n".join(f"- {f}" for f in sorted(items))
     except Exception as e:
         return f"Error listing {path}: {e}"
 
@@ -450,6 +451,32 @@ def call_llm_with_tools(
                     "content": result,
                 }
             )
+
+        # After list_files, auto-instruction to read all .py files
+        # This helps LLM understand it needs to read each file
+        if any(tc.get("tool") == "list_files" for tc in all_tool_calls[-len(tool_calls):] if tool_calls):
+            # Parse list_files result to get .py files
+            list_result = None
+            for tc in all_tool_calls:
+                if tc.get("tool") == "list_files":
+                    list_result = tc.get("result", "")
+                    break
+            
+            if list_result:
+                py_files = []
+                for line in list_result.split("\n"):
+                    line = line.strip()
+                    if line.startswith("- ") and line.endswith(".py"):
+                        py_files.append(line[2:])
+                
+                if py_files:
+                    dir_path = arguments.get("path", "backend/app/routers/")
+                    # Add instruction to read all files
+                    files_list = ", ".join(py_files)
+                    messages.append({
+                        "role": "user",
+                        "content": f"Good. Now read EACH of these Python files: {files_list}. Use read_file for each one.",
+                    })
 
     # Max iterations reached - generate final answer
     print("Max iterations reached, generating final answer", file=sys.stderr)
