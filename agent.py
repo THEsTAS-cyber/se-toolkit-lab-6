@@ -44,7 +44,10 @@ CRITICAL RULES:
    - Step 1: Call list_files to get all files
    - Step 2: Call read_file for EACH file (one at a time)
    - Step 3: ONLY after reading ALL files, provide final answer
-3. NEVER provide final answer before reading ALL relevant files
+3. For bug diagnosis questions ("crashes", "error", "bug"):
+   - Step 1: Query the API to see the actual error message
+   - Step 2: Read the source code to find the bug
+   - Step 3: Look for common bugs: None/sorted, division by zero, missing null checks
 4. For documentation questions: use read_file/list_files on wiki/, docs/
 5. For system data questions (counts, status): use query_api
 6. For code questions: use read_file on backend/app/*.py
@@ -74,6 +77,7 @@ Always respond in the same language as the user's question.
 IMPORTANT:
 - Provide a complete final answer in your last message
 - For "List all" questions: read EVERY file before answering
+- For bug questions: identify the EXACT error type (TypeError, ZeroDivisionError, etc.) and the line of code
 - For HTTP/auth errors: use query_api with use_auth=false"""
 
 
