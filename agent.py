@@ -10,19 +10,12 @@ Output:
 """
 
 import json
-import os
-import re
 import sys
 from pathlib import Path
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
-
-# Load environment variables from .env.agent.secret
-env_file = Path(__file__).parent / ".env.agent.secret"
-if env_file.exists():
-    load_dotenv(env_file)
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Allowed directories for file access
 ALLOWED_ROOTS = ["wiki", "docs", "contributing", "backend", "lab"]
@@ -37,25 +30,25 @@ ALLOWED_API_ENDPOINTS = [
     "/pipeline",
 ]
 
-# System prompt for the agent
+# System prompt for the system agent
 SYSTEM_PROMPT = """You are a documentation and system assistant for a Learning Management Service.
+You help users find information in project documentation AND query the live system.
 
 You have access to these tools:
 - read_file: Read documentation files (wiki/, docs/, contributing/, backend/)
 - list_files: List files in a directory
 - query_api: Query the backend LMS API for live system data
 
-CRITICAL RULES:
-1. NEVER answer from your own knowledge - ALWAYS use tools FIRST
-2. For "List all" questions - you MUST read EVERY file before answering
-3. For HTTP status code questions: use query_api with auth=false
-4. For system data questions (counts, status): use query_api
-5. For code questions: use read_file on backend/app/*.py
-6. ALWAYS cite sources in your answer
-7. When API returns [], report "0 items" - do NOT make up numbers
+When answering questions:
+1. For documentation questions (how to, concepts, workflows) → use read_file/list_files
+2. For system data questions (counts, status, current data) → use query_api
+3. For code questions (frameworks, libraries, implementation) → use read_file on backend/app/*.py
+4. Cite your sources - include file paths or API endpoints in the 'source' field
+5. Be concise and accurate
+6. When asked to "list" multiple items, read ALL relevant files before providing your final answer
 
 Project structure:
-- backend/app/main.py - FastAPI application
+- backend/app/main.py - Main FastAPI application
 - backend/app/settings.py - Configuration
 - backend/app/routers/items.py - Learning items and tasks
 - backend/app/routers/learners.py - Learner management
@@ -63,9 +56,10 @@ Project structure:
 - backend/app/routers/analytics.py - Analytics and statistics
 - backend/app/routers/pipeline.py - ETL pipeline
 - wiki/ - Project documentation
+- docs/ - Additional docs
 
 Available API endpoints:
-- /items/ - List all learning items
+- /items/ - List all learning items (labs, tasks)
 - /tasks/ - List all tasks
 - /learners/ - List all learners
 - /interactions/ - List interaction logs
@@ -75,36 +69,66 @@ Available API endpoints:
 
 Always respond in the same language as the user's question.
 
-Source format:
-- For files: backend/app/routers/analytics.py
-- For API: /items/ or /analytics/completion-rate/
-"""
+IMPORTANT: Provide a complete final answer in your last message. Do not say "let me continue" - instead provide the full answer based on all the information you've gathered.
+
+When API returns an empty list [], it means there are zero items - report this clearly (e.g., "There are 0 items in the database"). Do NOT make up numbers - only report what the API actually returns.
+
+For questions about HTTP status codes or authentication errors, use query_api with use_auth=false to make requests without authentication and observe the error response."""
 
 
-class AgentSettings:
-    """LLM and LMS configuration from environment variables."""
+class AgentSettings(BaseSettings):
+    """LLM and LMS configuration from .env files."""
 
-    def __init__(self):
-        self.llm_api_key = os.environ.get("LLM_API_KEY", "")
-        self.llm_api_base = os.environ.get("LLM_API_BASE", "http://localhost:8080/v1")
-        self.llm_model = os.environ.get("LLM_MODEL", "qwen3-coder-plus")
-        self.lms_api_base = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
-        self.lms_api_key = os.environ.get("LMS_API_KEY", "my-secret-api-key")
+    model_config = SettingsConfigDict(
+        env_file=".env.agent.secret",
+        env_file_encoding="utf-8",
+    )
+
+    # LLM configuration
+    llm_api_key: str
+    llm_api_base: str
+    llm_model: str
+
+    # LMS API configuration (optional, with defaults)
+    lms_api_base: str = "http://127.0.0.1:42002"
+    lms_api_key: str = "my-secret-api-key"
 
 
-def validate_path(relative_path: str, project_root: Path) -> Path:
-    """Validate and resolve a relative path securely."""
+def load_settings() -> AgentSettings:
+    """Load settings from .env.agent.secret."""
+    env_file = Path(__file__).parent / ".env.agent.secret"
+    if not env_file.exists():
+        print(f"Error: {env_file} not found", file=sys.stderr)
+        print(
+            "Copy .env.agent.example to .env.agent.secret and configure it",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return AgentSettings(_env_file=str(env_file))  # type: ignore[call-arg]
+
+
+def validate_path(relative_path: str) -> Path:
+    """Validate and resolve a relative path securely.
+
+    Prevents path traversal attacks by ensuring the path is within allowed directories.
+    """
+    # Check for path traversal attempts
     if ".." in relative_path:
         raise ValueError(f"Path traversal detected: {relative_path}")
 
-    base = project_root
+    # Resolve to absolute path
+    base = Path(__file__).parent
     target = (base / relative_path).resolve()
 
+    # Check if path is within allowed roots
     for allowed_root in ALLOWED_ROOTS:
         allowed_path = (base / allowed_root).resolve()
-        if str(target).startswith(str(allowed_path)) or str(target) == str(allowed_path):
+        if str(target).startswith(str(allowed_path)) or str(target) == str(
+            allowed_path
+        ):
             return target
 
+    # Also allow root-level files like docker-compose.yml, Dockerfile
     if target.parent == base and target.is_file():
         return target
 
@@ -115,10 +139,12 @@ def validate_path(relative_path: str, project_root: Path) -> Path:
 
 def validate_api_endpoint(endpoint: str) -> bool:
     """Validate that an API endpoint is allowed."""
+    # Normalize endpoint
     endpoint = endpoint.strip()
     if not endpoint.startswith("/"):
         endpoint = "/" + endpoint
 
+    # Check against allowed endpoints
     for allowed in ALLOWED_API_ENDPOINTS:
         if endpoint.startswith(allowed):
             return True
@@ -126,10 +152,10 @@ def validate_api_endpoint(endpoint: str) -> bool:
     return False
 
 
-def read_file(path: str, project_root: Path) -> str:
+def read_file(path: str) -> str:
     """Read the content of a file."""
     try:
-        validated_path = validate_path(path, project_root)
+        validated_path = validate_path(path)
         content = validated_path.read_text(encoding="utf-8")
         print(f"read_file: {path} ({len(content)} chars)", file=sys.stderr)
         return content
@@ -139,12 +165,12 @@ def read_file(path: str, project_root: Path) -> str:
         return f"Error reading {path}: {e}"
 
 
-def list_files(path: str, project_root: Path) -> str:
+def list_files(path: str) -> list[str]:
     """List files in a directory."""
     try:
-        validated_path = validate_path(path, project_root)
+        validated_path = validate_path(path)
         if not validated_path.is_dir():
-            return f"Error: Not a directory: {path}"
+            return [f"Error: Not a directory: {path}"]
 
         items: list[str] = []
         for item in validated_path.iterdir():
@@ -154,71 +180,71 @@ def list_files(path: str, project_root: Path) -> str:
                 items.append(f"{item.name}/")
 
         print(f"list_files: {path} ({len(items)} items)", file=sys.stderr)
-        return "Files:\n" + "\n".join(f"- {f}" for f in sorted(items))
+        return sorted(items)
     except Exception as e:
-        return f"Error listing {path}: {e}"
+        return [f"Error listing {path}: {e}"]
 
 
 def query_api(
-    method: str = "GET",
-    path: str = "",
-    body: str | None = None,
-    auth: bool = True,
-    settings: AgentSettings | None = None,
-) -> str:
-    """Query the backend LMS API with authentication."""
-    if settings is None:
-        settings = AgentSettings()
+    endpoint: str, method: str = "GET", params: dict[str, Any] | None = None, use_auth: bool = True
+) -> dict[str, Any]:
+    """Query the backend LMS API with authentication.
 
-    if not validate_api_endpoint(path):
-        return json.dumps({
-            "error": f"Invalid endpoint: {path}",
+    Args:
+        endpoint: API endpoint path (e.g., '/api/items')
+        method: HTTP method (GET or POST)
+        params: Optional query parameters or JSON body
+        use_auth: Whether to include authentication header (default: true)
+
+    Returns:
+        API response as dict, or error dict
+    """
+    settings = load_settings()
+
+    # Validate endpoint
+    if not validate_api_endpoint(endpoint):
+        return {
+            "error": f"Invalid endpoint: {endpoint}",
             "allowed": ALLOWED_API_ENDPOINTS,
-        })
+        }
 
-    if not path.endswith("/"):
-        path = path + "/"
+    # Normalize endpoint: ensure trailing slash for FastAPI compatibility
+    if not endpoint.endswith("/"):
+        endpoint = endpoint + "/"
 
-    url = f"{settings.lms_api_base}{path}"
+    # Build URL
+    url = f"{settings.lms_api_base}{endpoint}"
 
+    # Build headers - include auth only if requested
     headers = {"Content-Type": "application/json"}
-    if auth:
+    if use_auth:
         headers["Authorization"] = f"Bearer {settings.lms_api_key}"
 
-    print(f"query_api: {method} {url} (auth={auth})", file=sys.stderr)
+    print(f"query_api: {method} {url}", file=sys.stderr)
 
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             if method.upper() == "GET":
-                response = client.get(url, headers=headers)
+                response = client.get(url, headers=headers, params=params)
             elif method.upper() == "POST":
-                response = client.post(url, headers=headers, content=body or "{}")
-            elif method.upper() == "PUT":
-                response = client.put(url, headers=headers, content=body or "{}")
-            elif method.upper() == "DELETE":
-                response = client.delete(url, headers=headers)
+                response = client.post(url, headers=headers, json=params)
             else:
-                return json.dumps({"error": f"Unsupported method: {method}"})
+                return {"error": f"Unsupported method: {method}"}
 
-            result = {
-                "status_code": response.status_code,
-                "body": response.text,
-            }
-            print(f"query_api: {path} - status {response.status_code}", file=sys.stderr)
-            return json.dumps(result)
+            response.raise_for_status()
+            data = response.json()
+            print(f"query_api: {endpoint} - success", file=sys.stderr)
+            return data
 
     except httpx.HTTPStatusError as e:
         print(f"query_api: HTTP error {e.response.status_code}", file=sys.stderr)
-        return json.dumps({
-            "status_code": e.response.status_code,
-            "body": e.response.text,
-        })
+        return {"error": f"HTTP {e.response.status_code}", "detail": e.response.text}
     except httpx.RequestError as e:
         print(f"query_api: Request error: {e}", file=sys.stderr)
-        return json.dumps({"error": "Connection failed", "detail": str(e)})
+        return {"error": "Connection failed", "detail": str(e)}
     except Exception as e:
         print(f"query_api: Unexpected error: {e}", file=sys.stderr)
-        return json.dumps({"error": "Unexpected error", "detail": str(e)})
+        return {"error": "Unexpected error", "detail": str(e)}
 
 
 # Tool definitions for LLM function calling
@@ -265,25 +291,25 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "endpoint": {
+                        "type": "string",
+                        "description": "API endpoint path (e.g., '/items', '/tasks')",
+                    },
                     "method": {
                         "type": "string",
-                        "enum": ["GET", "POST", "PUT", "DELETE"],
+                        "enum": ["GET", "POST"],
                         "description": "HTTP method (default: GET)",
                     },
-                    "path": {
-                        "type": "string",
-                        "description": "API endpoint path (e.g., '/items/', '/analytics/completion-rate/')",
+                    "params": {
+                        "type": "object",
+                        "description": "Optional query parameters or JSON body",
                     },
-                    "body": {
-                        "type": "string",
-                        "description": "Optional JSON request body for POST/PUT requests",
-                    },
-                    "auth": {
+                    "use_auth": {
                         "type": "boolean",
                         "description": "Whether to include authentication header (default: true). Set to false to test authentication errors.",
                     },
                 },
-                "required": ["method", "path"],
+                "required": ["endpoint"],
             },
         },
     },
@@ -291,54 +317,41 @@ TOOLS = [
 
 
 def execute_tool_call(
-    name: str, arguments: dict[str, Any], settings: AgentSettings, project_root: Path
+    name: str, arguments: dict[str, Any], settings: AgentSettings
 ) -> Any:
     """Execute a tool call and return the result."""
     print(f"Executing tool: {name}({arguments})", file=sys.stderr)
 
     if name == "read_file":
-        return read_file(arguments.get("path", ""), project_root)
+        return read_file(arguments.get("path", ""))
     elif name == "list_files":
-        return list_files(arguments.get("path", ""), project_root)
+        return list_files(arguments.get("path", ""))
     elif name == "query_api":
+        # Load settings once and pass through
+        endpoint = arguments.get("endpoint", "")
         method = arguments.get("method", "GET")
-        path = arguments.get("path", "")
-        body = arguments.get("body")
-        auth = arguments.get("auth", True)
-        return query_api(method, path, body, auth, settings)
+        params = arguments.get("params")
+        use_auth = arguments.get("use_auth", True)
+        return query_api(endpoint, method, params, use_auth)
     else:
         return f"Error: Unknown tool: {name}"
 
 
-def extract_tool_calls_from_response(response: dict) -> list[dict]:
-    """Extract tool calls from LLM response using native function calling."""
-    tool_calls = []
-    choice = response.get("choices", [{}])[0]
-    message = choice.get("message", {})
-    
-    # Check for native tool_calls
-    native_calls = message.get("tool_calls", [])
-    for tc in native_calls:
-        function = tc.get("function", {})
-        tool_calls.append({
-            "id": tc.get("id", ""),
-            "name": function.get("name", "unknown"),
-            "arguments": json.loads(function.get("arguments", "{}")),
-        })
-    
-    return tool_calls
-
-
 def call_llm_with_tools(
-    question: str, settings: AgentSettings, project_root: Path, max_iterations: int = 20
+    question: str, settings: AgentSettings, max_iterations: int = 15
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
-    """Call the LLM API with tool support and agentic loop."""
+    """Call the LLM API with tool support and agentic loop.
+
+    Returns:
+        tuple: (answer, sources, tool_calls)
+    """
     url = f"{settings.llm_api_base}/chat/completions"
     headers = {
         "Authorization": f"Bearer {settings.llm_api_key}",
         "Content-Type": "application/json",
     }
 
+    # Initialize conversation with system prompt
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -346,13 +359,11 @@ def call_llm_with_tools(
 
     all_tool_calls: list[dict[str, Any]] = []
     sources: set[str] = set()
-    
-    # Track files to auto-read after list_files
-    pending_files: list[str] = []
 
     for iteration in range(max_iterations):
         print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---", file=sys.stderr)
 
+        # Build request payload
         payload: dict[str, Any] = {
             "model": settings.llm_model,
             "messages": messages,
@@ -373,75 +384,75 @@ def call_llm_with_tools(
             print(f"Request error: {e}", file=sys.stderr)
             sys.exit(1)
 
+        # Parse response
         choice = data["choices"][0]
         message = choice["message"]
-        tool_calls = extract_tool_calls_from_response(response)
 
-        # If no tool calls from LLM but we have pending files, auto-read them
-        if not tool_calls and pending_files:
-            next_file = pending_files.pop(0)
-            tool_calls = [{
-                "id": f"auto_{iteration}",
-                "name": "read_file",
-                "arguments": {"path": next_file},
-            }]
+        # Check for tool calls
+        tool_calls = message.get("tool_calls", [])
 
         if not tool_calls:
-            answer = message.get("content") or ""
+            # No tool calls - LLM provided final answer
+            answer = message.get("content", "")
             print(f"Final answer received", file=sys.stderr)
             return answer, list(sources), all_tool_calls
 
+        # Process tool calls
         print(f"LLM requested {len(tool_calls)} tool call(s)", file=sys.stderr)
+
+        # Add assistant message with tool calls to conversation
         messages.append(message)
 
+        # Execute each tool call
         for tool_call in tool_calls:
-            name = tool_call.get("name", "unknown")
-            arguments = tool_call.get("arguments", {})
+            function = tool_call.get("function", {})
+            name = function.get("name", "unknown")
+            arguments_str = function.get("arguments", "{}")
 
-            result = execute_tool_call(name, arguments, settings, project_root)
+            # Parse arguments
+            try:
+                arguments = json.loads(arguments_str)
+            except json.JSONDecodeError:
+                arguments = {}
+
+            # Record tool call
+            tool_call_record: dict[str, Any] = {
+                "name": name,
+                "arguments": arguments,
+            }
+            all_tool_calls.append(tool_call_record)
+
+            # Execute tool
+            result = execute_tool_call(name, arguments, settings)  # type: ignore[arg-type]
 
             # Track sources
             if name == "read_file" and not str(result).startswith("Error"):
-                source_path = str(arguments.get("path", ""))
+                source_path = str(arguments.get("path", ""))  # type: ignore[unknown-argument-type]
                 sources.add(source_path)
             elif name == "list_files" and not str(result).startswith("Error"):
                 dir_path = str(arguments.get("path", ""))
                 sources.add(dir_path)
-                
-                # Parse list_files result to find .py files to read
-                for line in result.split("\n"):
-                    line = line.strip()
-                    if line.startswith("- ") and line.endswith(".py"):
-                        file_name = line[2:]
-                        full_path = f"{dir_path}{file_name}"
-                        pending_files.append(full_path)
-                
             elif name == "query_api" and not (
                 isinstance(result, dict) and "error" in result
             ):
-                endpoint = str(arguments.get("path", ""))
+                endpoint = str(arguments.get("endpoint", ""))  # type: ignore[unknown-argument-type]
                 sources.add(endpoint)
-
-            # Store tool call with result for output
-            tool_call_record: dict[str, Any] = {
-                "tool": name,
-                "args": arguments,
-                "result": result,
-            }
-            all_tool_calls.append(tool_call_record)
 
             # Add tool result to conversation
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.get("id", ""),
-                    "content": result,
+                    "content": json.dumps(result)
+                    if isinstance(result, dict)
+                    else str(result),
                 }
             )
 
-    # Max iterations reached - generate final answer
+    # If we reach max iterations, generate final answer from accumulated context
     print("Max iterations reached, generating final answer", file=sys.stderr)
 
+    # Request final answer without tools
     payload = {
         "model": settings.llm_model,
         "messages": messages,
@@ -467,15 +478,16 @@ def main() -> None:
 
     question = sys.argv[1]
 
-    settings = AgentSettings()
-    project_root = Path(__file__).parent.resolve()
-
-    print(f"Loaded settings", file=sys.stderr)
+    # Load configuration
+    settings = load_settings()
+    print(f"Loaded settings from .env.agent.secret", file=sys.stderr)
     print(f"Model: {settings.llm_model}", file=sys.stderr)
     print(f"LMS API: {settings.lms_api_base}", file=sys.stderr)
 
-    answer, sources, tool_calls = call_llm_with_tools(question, settings, project_root)
+    # Call LLM with tools
+    answer, sources, tool_calls = call_llm_with_tools(question, settings)
 
+    # Output JSON to stdout
     result: dict[str, Any] = {
         "answer": answer,
         "source": list(sources),
