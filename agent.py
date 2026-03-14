@@ -59,8 +59,9 @@ class Tools:
     def __init__(self, project_root: Path):
         self.project_root = project_root.resolve()
 
-        # Load backend API configuration
-        self.api_url = os.environ.get("LMS_API_URL", "")
+        # Load backend API configuration from environment
+        # AGENT_API_BASE_URL defaults to http://localhost:42002
+        self.api_url = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
         self.api_key = os.environ.get("LMS_API_KEY", "")
 
     def _is_safe_path(self, requested_path: str) -> bool:
@@ -378,7 +379,12 @@ class Agent:
                         arg = arg.strip()
                         if "=" in arg:
                             key, value = arg.split("=", 1)
-                            args[key.strip()] = value.strip().strip('"').strip("'")
+                            key = key.strip()
+                            value = value.strip().strip('"').strip("'")
+                            # Convert auth string to boolean
+                            if key == "auth":
+                                value = value.lower() == "true"
+                            args[key] = value
                     
                     tool_calls.append(ToolCall(
                         name=tool_name,
