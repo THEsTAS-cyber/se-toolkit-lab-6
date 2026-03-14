@@ -426,11 +426,10 @@ class Agent:
                     tc.result = result
                     self.tool_calls_history.append(tc)
 
-                    # Add tool result to messages with matching tool_call_id
+                    # Add tool result as user message (Qwen-compatible format)
                     self.messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result,
+                        "role": "user",
+                        "content": f"Tool result for {tc.name}({tc.arguments}): {result}",
                     })
 
                 # Continue loop - LLM will process tool results
