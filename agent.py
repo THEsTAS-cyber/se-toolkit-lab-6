@@ -245,6 +245,7 @@ class Tools:
                 arguments.get("method", "GET"),
                 arguments.get("path", ""),
                 arguments.get("body"),
+                arguments.get("auth", True),
             )
         else:
             return f"Error: Unknown tool: {name}"
@@ -519,20 +520,19 @@ def main():
         agent = Agent()
         response = agent.run(user_input)
 
-        # Output JSON
+        # Output JSON - match expected format: {"name", "arguments"}
         output = {
             "answer": response.answer,
             "source": response.source,
             "tool_calls": [
                 {
-                    "tool": tc.name,
-                    "args": tc.arguments,
-                    "result": tc.result,
+                    "name": tc.name,
+                    "arguments": tc.arguments,
                 }
                 for tc in response.tool_calls
             ],
         }
-        print(json.dumps(output, indent=2))
+        print(json.dumps(output))
     except Exception as e:
         # Return error as valid JSON
         error_output = {
